@@ -137,6 +137,16 @@ The most reliable way to express a repository's line-ending policy is `.gitattri
 - **Shell selection.** Nothing can make the agent use Git Bash or cmd. WSL is the only alternative, with its own trade-offs.
 - **Spurious permission prompts on PowerShell syntax.** Fixed in Copilot CLI 1.0.52 to 1.0.68; update the CLI.
 
+## Experimental Copilot CLI features and this problem
+
+Evaluated against CLI 1.0.103 (2026-10-22). None of the experimental features fixes the file tools' CRLF/BOM behavior, but three are worth knowing about:
+
+- **Extensions** (`--experimental`): in-process JavaScript that can register tools and session hook callbacks (`onPreToolUse`, `onPostToolUse`, `onSessionStart`). A future version of this plugin could ship the guard and normalizer as an extension and avoid spawning PowerShell on every tool call. The earlier blockers are reported fixed: plugin-shipped extensions load since v1.0.88 ([copilot-cli#3023](https://github.com/github/copilot-cli/issues/3023)) and `additionalContext` from extension hooks is honored ([copilot-cli#2652](https://github.com/github/copilot-cli/issues/2652)). Remaining costs: every user must keep experimental mode on, extension hooks cannot see tool failures yet ([copilot-sdk#1220](https://github.com/github/copilot-sdk/issues/1220)), each extension asks for approval, and prompt-mode sessions need `GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS=true`. Built-in tools cannot be overridden, so an extension cannot replace `edit` either.
+- **`/rewind` file restore**: restores only the files Copilot changed, without git. A useful undo when a whole-file rewrite slips through.
+- **Dynamic retrieval of skills** (`dynamicRetrieval.skills`): embedding-based per-turn retrieval that makes the quoting skill more likely to load when a prompt involves quoting or shell commands.
+
+The **assisted approval** mode, the **critic** and **rubber-duck** agents and **autopilot** are about approvals, review and autonomy, not bytes on disk; they neither help nor hurt here. Hooks remain the only deterministic layer.
+
 ## Development
 
 ```powershell
