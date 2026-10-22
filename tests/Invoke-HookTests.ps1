@@ -258,6 +258,13 @@ Test-CoachResult 'powershell' @{ command = 'echo "a' } "ParserError: `nLine |`n 
 Test-CoachResult 'powershell' @{ command = 'Get-Item .\does-not-exist.txt' } "Get-Item: Cannot find path 'C:\x\does-not-exist.txt' because it does not exist.`n<shellId: 0 completed with exit code 1>" $false
 Test-CoachResult 'edit' @{ path = 'a.txt' } "No match found" $false
 
+# ---------------------------------------------------------------- inject-rules
+Write-Host "`n--- inject-rules.ps1"
+$r = Invoke-Hook 'inject-rules.ps1' (@{ sessionId = 's'; timestamp = 1; cwd = $Work; source = 'startup' })
+$ctx = ''
+try { $ctx = [string](($r.Out | ConvertFrom-Json).additionalContext) } catch { }
+Assert (($r.Code -eq 0) -and ($ctx -like '*Windows environment rules*') -and ($ctx -like '*edit and create tools*')) 'sessionStart injects the rules file as additionalContext' "code=$($r.Code) out=$($r.Out.Substring(0, [Math]::Min(200, $r.Out.Length)))"
+
 # ---------------------------------------------------------------- hooks.json launcher end-to-end
 Write-Host "`n--- hooks.json inline launcher"
 $hooks = Get-Content -Raw (Join-Path $PluginDir 'com.github.copilot\hooks\hooks.json') | ConvertFrom-Json

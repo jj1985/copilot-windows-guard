@@ -28,9 +28,11 @@ Hooks are the only user-controlled layer that sits between the model and the fil
 | `utf8-gate.ps1` | `preToolUse` on `edit`, `str_replace_editor`, `apply_patch` | Refuses to edit a file that is Windows-1252, UTF-16 or otherwise not UTF-8, because the edit tool would corrupt it irreversibly, and tells the agent to ask you first. |
 | `recovery-coach.ps1` | `postToolUse` on the shell tool, and `postToolUseFailure` on all tools | When a command exits non-zero or an edit fails, recognizes the cause (quoting, bash-ism, 5.1 syntax, "No match found", locked file, execution policy) and appends concrete recovery steps to what the agent sees. The edit guidance explicitly forbids rewriting the whole file as a workaround. (Copilot CLI reports a failed shell command as a successful tool call with the exit code in the text, which is why the shell path uses `postToolUse`.) |
 
+| `inject-rules.ps1` | `sessionStart` | Injects the rules file below as session context. Copilot CLI 1.0.101 does not load a plugin's `com.github.copilot/rules/` as an instruction source (`copilot instruction list` shows nothing and the model reports the rules as absent), so the hook delivers them deterministically. |
+
 Plus two instruction components:
 
-- `com.github.copilot/rules/windows-guard.md`: short always-on rules (PowerShell equivalents, quoting, "file content goes through the edit tool", what to do on "No match found").
+- `com.github.copilot/rules/windows-guard.md`: short always-on rules (PowerShell equivalents, quoting, "file content goes through the edit tool", what to do on "No match found"). Delivered by the `sessionStart` hook; if a future CLI loads `rules/` natively, the text would appear twice, which is harmless, and the hook can then be dropped.
 - `skills/windows-powershell-quoting/SKILL.md`: a quoting and file-writing reference the agent loads when a command involves quotes, JSON, paths with spaces, `npm`/`.cmd` shims, or after a quoting error.
 
 ### Design notes

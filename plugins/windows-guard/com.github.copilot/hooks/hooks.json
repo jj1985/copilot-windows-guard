@@ -1,6 +1,14 @@
 {
   "version": 1,
   "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "powershell": "try { if (-not $env:PLUGIN_ROOT) { exit 0 }; $s = Join-Path $env:PLUGIN_ROOT 'scripts/inject-rules.ps1'; if (-not (Test-Path -LiteralPath $s)) { exit 0 }; $x = Get-Command pwsh -ErrorAction SilentlyContinue; if (-not $x) { $x = Get-Command powershell -ErrorAction SilentlyContinue }; if (-not $x) { exit 0 }; $OutputEncoding = New-Object System.Text.UTF8Encoding($false); $i = [Console]::OpenStandardInput(); $m = New-Object System.IO.MemoryStream; $i.CopyTo($m); $t = [System.Text.Encoding]::UTF8.GetString($m.ToArray()); $t | & $x.Source -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $s; exit $LASTEXITCODE } catch { exit 0 }",
+        "bash": "true",
+        "timeoutSec": 10
+      }
+    ],
     "preToolUse": [
       {
         "type": "command",
