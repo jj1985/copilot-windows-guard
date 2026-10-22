@@ -1,0 +1,3 @@
+# Hook logs written during local testing
+*.log
+tests/.work/

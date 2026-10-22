@@ -1,0 +1,13 @@
+# Everything Git detects as text is LF in the index and in the working tree, on every OS.
+* text=auto eol=lf
+
+# Windows batch files break without CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Never touch binaries.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.zip binary

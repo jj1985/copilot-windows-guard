@@ -1,0 +1,45 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  hooks:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate JSON manifests
+        shell: pwsh
+        run: |
+          foreach ($f in 'plugins/windows-guard/plugin.json',
+                         'plugins/windows-guard/com.github.copilot/hooks/hooks.json',
+                         '.github/plugin/marketplace.json') {
+            Get-Content -Raw $f | ConvertFrom-Json | Out-Null
+            "ok  $f"
+          }
+
+      - name: Parse every script under PowerShell 7 and 5.1
+        shell: pwsh
+        run: |
+          foreach ($sh in 'pwsh', 'powershell') {
+            & $sh -NoProfile -NonInteractive -Command '
+              $bad = 0
+              Get-ChildItem plugins/windows-guard/scripts/*.ps1 | ForEach-Object {
+                $t = $null; $e = $null
+                [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$t, [ref]$e)
+                if ($e.Count) { $bad++; "ERR $($_.Name): " + (($e | ForEach-Object { $_.Message }) -join " | ") } else { "ok  $($_.Name) ($($PSVersionTable.PSVersion))" }
+              }
+              exit $bad'
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+
+      - name: Hook tests under PowerShell 7
+        shell: pwsh
+        run: pwsh -NoProfile -File tests/Invoke-HookTests.ps1
+
+      - name: Hook tests under Windows PowerShell 5.1
+        shell: pwsh
+        run: pwsh -NoProfile -File tests/Invoke-HookTests.ps1 -Shell powershell

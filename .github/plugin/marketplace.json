@@ -1,0 +1,35 @@
+{
+  "name": "copilot-windows-guard",
+  "owner": {
+    "name": "jj1985"
+  },
+  "metadata": {
+    "description": "Windows 11 reliability fixes for GitHub Copilot CLI: line endings, BOMs, encodings, PowerShell quoting.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "windows-guard",
+      "description": "Stops GitHub Copilot CLI from corrupting files on Windows. Restores line endings and strips BOMs after every edit, blocks bash-isms and unsafe shell writes in PowerShell, refuses edits that would destroy non-UTF-8 files, and coaches the model through quoting and edit-match failures.",
+      "version": "0.1.0",
+      "source": "./plugins/windows-guard",
+      "author": {
+        "name": "jj1985"
+      },
+      "homepage": "https://github.com/jj1985/copilot-windows-guard",
+      "repository": "https://github.com/jj1985/copilot-windows-guard",
+      "license": "MIT",
+      "category": "productivity",
+      "keywords": [
+        "windows",
+        "powershell",
+        "line-endings",
+        "crlf",
+        "bom",
+        "utf-8",
+        "quoting",
+        "hooks"
+      ]
+    }
+  ]
+}
