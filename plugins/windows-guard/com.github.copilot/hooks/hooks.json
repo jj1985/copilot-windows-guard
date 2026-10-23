@@ -4,7 +4,7 @@
     "sessionStart": [
       {
         "type": "command",
-        "powershell": "try { if (-not $env:PLUGIN_ROOT) { exit 0 }; $s = Join-Path $env:PLUGIN_ROOT 'scripts/inject-rules.ps1'; if (-not (Test-Path -LiteralPath $s)) { exit 0 }; $x = Get-Command pwsh -ErrorAction SilentlyContinue; if (-not $x) { $x = Get-Command powershell -ErrorAction SilentlyContinue }; if (-not $x) { exit 0 }; $OutputEncoding = New-Object System.Text.UTF8Encoding($false); $i = [Console]::OpenStandardInput(); $m = New-Object System.IO.MemoryStream; $i.CopyTo($m); $t = [System.Text.Encoding]::UTF8.GetString($m.ToArray()); $t | & $x.Source -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $s; exit $LASTEXITCODE } catch { exit 0 }",
+        "powershell": "try { if ($env:WINDOWS_GUARD_MODE -eq 'extension') { exit 0 }; if (-not $env:PLUGIN_ROOT) { exit 0 }; $s = Join-Path $env:PLUGIN_ROOT 'scripts/inject-rules.ps1'; if (-not (Test-Path -LiteralPath $s)) { exit 0 }; $x = Get-Command pwsh -ErrorAction SilentlyContinue; if (-not $x) { $x = Get-Command powershell -ErrorAction SilentlyContinue }; if (-not $x) { exit 0 }; $OutputEncoding = New-Object System.Text.UTF8Encoding($false); $i = [Console]::OpenStandardInput(); $m = New-Object System.IO.MemoryStream; $i.CopyTo($m); $t = [System.Text.Encoding]::UTF8.GetString($m.ToArray()); $t | & $x.Source -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $s; exit $LASTEXITCODE } catch { exit 0 }",
         "bash": "true",
         "timeoutSec": 10
       }
@@ -13,14 +13,14 @@
       {
         "type": "command",
         "matcher": "bash|powershell",
-        "powershell": "try { if (-not $env:PLUGIN_ROOT) { exit 0 }; $s = Join-Path $env:PLUGIN_ROOT 'scripts/shell-guard.ps1'; if (-not (Test-Path -LiteralPath $s)) { exit 0 }; $x = Get-Command pwsh -ErrorAction SilentlyContinue; if (-not $x) { $x = Get-Command powershell -ErrorAction SilentlyContinue }; if (-not $x) { exit 0 }; $OutputEncoding = New-Object System.Text.UTF8Encoding($false); $i = [Console]::OpenStandardInput(); $m = New-Object System.IO.MemoryStream; $i.CopyTo($m); $t = [System.Text.Encoding]::UTF8.GetString($m.ToArray()); $t | & $x.Source -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $s; exit $LASTEXITCODE } catch { exit 0 }",
+        "powershell": "try { if ($env:WINDOWS_GUARD_MODE -eq 'extension') { exit 0 }; if (-not $env:PLUGIN_ROOT) { exit 0 }; $s = Join-Path $env:PLUGIN_ROOT 'scripts/shell-guard.ps1'; if (-not (Test-Path -LiteralPath $s)) { exit 0 }; $x = Get-Command pwsh -ErrorAction SilentlyContinue; if (-not $x) { $x = Get-Command powershell -ErrorAction SilentlyContinue }; if (-not $x) { exit 0 }; $OutputEncoding = New-Object System.Text.UTF8Encoding($false); $i = [Console]::OpenStandardInput(); $m = New-Object System.IO.MemoryStream; $i.CopyTo($m); $t = [System.Text.Encoding]::UTF8.GetString($m.ToArray()); $t | & $x.Source -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $s; exit $LASTEXITCODE } catch { exit 0 }",
         "bash": "true",
         "timeoutSec": 10
       },
       {
         "type": "command",
         "matcher": "edit|str_replace_editor|apply_patch",
-        "powershell": "try { if (-not $env:PLUGIN_ROOT) { exit 0 }; $s = Join-Path $env:PLUGIN_ROOT 'scripts/utf8-gate.ps1'; if (-not (Test-Path -LiteralPath $s)) { exit 0 }; $x = Get-Command pwsh -ErrorAction SilentlyContinue; if (-not $x) { $x = Get-Command powershell -ErrorAction SilentlyContinue }; if (-not $x) { exit 0 }; $OutputEncoding = New-Object System.Text.UTF8Encoding($false); $i = [Console]::OpenStandardInput(); $m = New-Object System.IO.MemoryStream; $i.CopyTo($m); $t = [System.Text.Encoding]::UTF8.GetString($m.ToArray()); $t | & $x.Source -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $s; exit $LASTEXITCODE } catch { exit 0 }",
+        "powershell": "try { if ($env:WINDOWS_GUARD_MODE -eq 'extension') { exit 0 }; if (-not $env:PLUGIN_ROOT) { exit 0 }; $s = Join-Path $env:PLUGIN_ROOT 'scripts/utf8-gate.ps1'; if (-not (Test-Path -LiteralPath $s)) { exit 0 }; $x = Get-Command pwsh -ErrorAction SilentlyContinue; if (-not $x) { $x = Get-Command powershell -ErrorAction SilentlyContinue }; if (-not $x) { exit 0 }; $OutputEncoding = New-Object System.Text.UTF8Encoding($false); $i = [Console]::OpenStandardInput(); $m = New-Object System.IO.MemoryStream; $i.CopyTo($m); $t = [System.Text.Encoding]::UTF8.GetString($m.ToArray()); $t | & $x.Source -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $s; exit $LASTEXITCODE } catch { exit 0 }",
         "bash": "true",
         "timeoutSec": 10
       }
@@ -29,14 +29,14 @@
       {
         "type": "command",
         "matcher": "edit|create|str_replace_editor|apply_patch",
-        "powershell": "try { if (-not $env:PLUGIN_ROOT) { exit 0 }; $s = Join-Path $env:PLUGIN_ROOT 'scripts/normalize-eol.ps1'; if (-not (Test-Path -LiteralPath $s)) { exit 0 }; $x = Get-Command pwsh -ErrorAction SilentlyContinue; if (-not $x) { $x = Get-Command powershell -ErrorAction SilentlyContinue }; if (-not $x) { exit 0 }; $OutputEncoding = New-Object System.Text.UTF8Encoding($false); $i = [Console]::OpenStandardInput(); $m = New-Object System.IO.MemoryStream; $i.CopyTo($m); $t = [System.Text.Encoding]::UTF8.GetString($m.ToArray()); $t | & $x.Source -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $s; exit $LASTEXITCODE } catch { exit 0 }",
+        "powershell": "try { if ($env:WINDOWS_GUARD_MODE -eq 'extension') { exit 0 }; if (-not $env:PLUGIN_ROOT) { exit 0 }; $s = Join-Path $env:PLUGIN_ROOT 'scripts/normalize-eol.ps1'; if (-not (Test-Path -LiteralPath $s)) { exit 0 }; $x = Get-Command pwsh -ErrorAction SilentlyContinue; if (-not $x) { $x = Get-Command powershell -ErrorAction SilentlyContinue }; if (-not $x) { exit 0 }; $OutputEncoding = New-Object System.Text.UTF8Encoding($false); $i = [Console]::OpenStandardInput(); $m = New-Object System.IO.MemoryStream; $i.CopyTo($m); $t = [System.Text.Encoding]::UTF8.GetString($m.ToArray()); $t | & $x.Source -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $s; exit $LASTEXITCODE } catch { exit 0 }",
         "bash": "true",
         "timeoutSec": 15
       },
       {
         "type": "command",
         "matcher": "bash|powershell",
-        "powershell": "try { if (-not $env:PLUGIN_ROOT) { exit 0 }; $s = Join-Path $env:PLUGIN_ROOT 'scripts/recovery-coach.ps1'; if (-not (Test-Path -LiteralPath $s)) { exit 0 }; $x = Get-Command pwsh -ErrorAction SilentlyContinue; if (-not $x) { $x = Get-Command powershell -ErrorAction SilentlyContinue }; if (-not $x) { exit 0 }; $OutputEncoding = New-Object System.Text.UTF8Encoding($false); $i = [Console]::OpenStandardInput(); $m = New-Object System.IO.MemoryStream; $i.CopyTo($m); $t = [System.Text.Encoding]::UTF8.GetString($m.ToArray()); $t | & $x.Source -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $s; exit $LASTEXITCODE } catch { exit 0 }",
+        "powershell": "try { if ($env:WINDOWS_GUARD_MODE -eq 'extension') { exit 0 }; if (-not $env:PLUGIN_ROOT) { exit 0 }; $s = Join-Path $env:PLUGIN_ROOT 'scripts/recovery-coach.ps1'; if (-not (Test-Path -LiteralPath $s)) { exit 0 }; $x = Get-Command pwsh -ErrorAction SilentlyContinue; if (-not $x) { $x = Get-Command powershell -ErrorAction SilentlyContinue }; if (-not $x) { exit 0 }; $OutputEncoding = New-Object System.Text.UTF8Encoding($false); $i = [Console]::OpenStandardInput(); $m = New-Object System.IO.MemoryStream; $i.CopyTo($m); $t = [System.Text.Encoding]::UTF8.GetString($m.ToArray()); $t | & $x.Source -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $s; exit $LASTEXITCODE } catch { exit 0 }",
         "bash": "true",
         "timeoutSec": 10
       }
@@ -44,7 +44,7 @@
     "postToolUseFailure": [
       {
         "type": "command",
-        "powershell": "try { if (-not $env:PLUGIN_ROOT) { exit 0 }; $s = Join-Path $env:PLUGIN_ROOT 'scripts/recovery-coach.ps1'; if (-not (Test-Path -LiteralPath $s)) { exit 0 }; $x = Get-Command pwsh -ErrorAction SilentlyContinue; if (-not $x) { $x = Get-Command powershell -ErrorAction SilentlyContinue }; if (-not $x) { exit 0 }; $OutputEncoding = New-Object System.Text.UTF8Encoding($false); $i = [Console]::OpenStandardInput(); $m = New-Object System.IO.MemoryStream; $i.CopyTo($m); $t = [System.Text.Encoding]::UTF8.GetString($m.ToArray()); $t | & $x.Source -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $s; exit $LASTEXITCODE } catch { exit 0 }",
+        "powershell": "try { if ($env:WINDOWS_GUARD_MODE -eq 'extension') { exit 0 }; if (-not $env:PLUGIN_ROOT) { exit 0 }; $s = Join-Path $env:PLUGIN_ROOT 'scripts/recovery-coach.ps1'; if (-not (Test-Path -LiteralPath $s)) { exit 0 }; $x = Get-Command pwsh -ErrorAction SilentlyContinue; if (-not $x) { $x = Get-Command powershell -ErrorAction SilentlyContinue }; if (-not $x) { exit 0 }; $OutputEncoding = New-Object System.Text.UTF8Encoding($false); $i = [Console]::OpenStandardInput(); $m = New-Object System.IO.MemoryStream; $i.CopyTo($m); $t = [System.Text.Encoding]::UTF8.GetString($m.ToArray()); $t | & $x.Source -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $s; exit $LASTEXITCODE } catch { exit 0 }",
         "bash": "true",
         "timeoutSec": 10
       }

@@ -21,6 +21,18 @@ jobs:
             "ok  $f"
           }
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check extension syntax
+        run: |
+          node --check plugins/windows-guard/com.github.copilot/extensions/windows-guard/extension.mjs
+          node --check plugins/windows-guard/com.github.copilot/extensions/windows-guard/guard.mjs
+
+      - name: Extension unit tests (node --test)
+        run: node --test tests/extension.test.mjs
+
       - name: Parse every script under PowerShell 7 and 5.1
         shell: pwsh
         run: |
