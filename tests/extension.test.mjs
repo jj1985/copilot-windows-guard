@@ -216,7 +216,7 @@ describe("normalizeEol", () => {
 // ---------------------------------------------------------------- shell-guard
 describe("shellGuard", { skip: !pwsh && "no PowerShell host for the analyzer" }, () => {
   async function expectGuard(cmd, expectDeny, hint = "") {
-    const d = await g.shellGuard(cmd, { ...opts, env: guardEnv });
+    const d = await g.shellGuard(cmd, { ...opts, env: guardEnv, cwd: work });
     const denied = Boolean(d && d.permissionDecision === "deny");
     assert.equal(denied, expectDeny, `decision for: ${cmd}\n${JSON.stringify(d)}`);
     if (hint) {
@@ -278,7 +278,7 @@ describe("shellGuard", { skip: !pwsh && "no PowerShell host for the analyzer" },
   it("allow: the word head inside a quoted argument", () => expectGuard('gh pr comment 12 --body "Rebased onto main (head ecba1d7)"', false));
   it("allow: a Unix pipeline inside a wsl argument", () => expectGuard("wsl bash -lc 'ls -la | head -3'", false));
   it("allow: conflict marker inside a string", () => expectGuard("Select-String -Path a.txt -Pattern '<<<<<<< HEAD'", false));
-  it("allow: a path ending in a backslash", () => expectGuard('cd "C:\\build\\"; Get-ChildItem', false));
+  it("allow: a path ending in a backslash", () => expectGuard('cd "C:\\Windows\\"; Get-ChildItem', false));
   it("deny: bash escape with a single quote elsewhere", () => expectGuard("python -c \"d = {'a': 1}; print(\\\"ok\\\")\"", true));
   it("deny: multi-line python -c", () => expectGuard("python -c \"import os\nfor f in os.listdir('.'):\n    print(f)\"", true, "here-string"));
   it("allow: multi-line python -c with # wg:allow", () => expectGuard("python -c \"import os\nprint(os.getcwd())\" # wg:allow", false));
@@ -286,6 +286,22 @@ describe("shellGuard", { skip: !pwsh && "no PowerShell host for the analyzer" },
   it("deny: head inside a script block", () => expectGuard("Get-ChildItem | ForEach-Object { head $_ }", true, "Select-Object"));
   it("deny: 2> to a file", () => expectGuard("dotnet build 2> errors.txt", true, "edit/create tool"));
   it("allow: Set-Content with -Encoding:utf8", () => expectGuard("'x' | Set-Content -Encoding:utf8 out.txt", false));
+  // Phase 3: silent wrong-directory and wrong-data failures.
+  it("deny: relative .NET path after cd", () => expectGuard("cd C:\\Windows; [IO.File]::Exists('probe.txt')", true, "Resolve-Path"));
+  it("allow: relative .NET path without cd", () => expectGuard("[IO.File]::Exists('probe.txt')", false));
+  it("allow: absolute .NET path after cd", () => expectGuard("cd C:\\Windows; [IO.File]::Exists('C:\\Windows\\notepad.exe')", false));
+  it("allow: $PWD-based .NET path after cd", () => expectGuard('cd C:\\Windows; [IO.File]::Exists("$PWD\\notepad.exe")', false));
+  it("deny: .NET path from a variable assigned a relative literal", () => expectGuard("cd C:\\Windows; $p = 'out.txt'; [IO.File]::WriteAllText($p, 'x')", true, "Resolve-Path"));
+  it("deny: cd to a missing folder followed by more statements", () => expectGuard("cd C:\\nonexistent-wg; Get-Location", true, "ErrorAction Stop"));
+  it("deny: cd to a missing relative folder followed by more statements", () => expectGuard("cd nope-sub; Get-ChildItem", true, "ErrorAction Stop"));
+  it("allow: cd to an existing folder followed by more statements", () => expectGuard("cd C:\\Windows; Get-Location", false));
+  it("allow: cd to a missing folder as the only statement", () => expectGuard("cd C:\\nonexistent-wg", false));
+  it("allow: mkdir then cd into it", () => expectGuard("New-Item -ItemType Directory -Force C:\\nonexistent-wg | Out-Null; cd C:\\nonexistent-wg; Get-ChildItem", false));
+  it("deny: 2>&1 into ConvertFrom-Json", () => expectGuard("gh api repos/o/r 2>&1 | ConvertFrom-Json", true, "2>$null"));
+  it("deny: 2>&1 into python json.load(sys.stdin)", () => expectGuard("gh api repos/o/r 2>&1 | python -c \"import sys, json; print(json.load(sys.stdin)['name'])\"", true, "2>$null"));
+  it("deny: 2>&1 into jq", () => expectGuard("gh api repos/o/r 2>&1 | jq .name", true, "2>$null"));
+  it("allow: 2>$null into ConvertFrom-Json", () => expectGuard("gh api repos/o/r 2>$null | ConvertFrom-Json", false));
+  it("allow: 2>&1 into Select-String", () => expectGuard("dotnet build 2>&1 | Select-String error", false));
 });
 
 // ---------------------------------------------------------------- utf8-gate
@@ -369,6 +385,21 @@ describe("coach (postToolUse shell result)", () => {
   it("Cannot find path (exit 1, unrecognized cause) -> silent", () =>
     coach("powershell", { command: "Get-Item .\\does-not-exist.txt" }, "Get-Item: Cannot find path 'C:\\x\\does-not-exist.txt' because it does not exist.\n<shellId: 0 completed with exit code 1>", false));
   it("edit tool results are not coached here", () => coach("edit", { path: "a.txt" }, "No match found", false));
+  // Phase 3 branches.
+  it("failed cd at exit 0 -> previous-folder warning", () =>
+    coach("powershell", { command: "cd C:\\nonexistent; Get-Location" }, "Set-Location: Cannot find path 'C:\\nonexistent' because it does not exist.\nC:\\old\n<shellId: 0 completed with exit code 0>", true, "previous folder"));
+  it("failed cd in the PowerShell 7 multi-line error layout -> previous-folder warning", () =>
+    coach("powershell", { command: "Get-Location; cd nonexistent-sub; Get-Location" }, "Path\n----\nC:\\w\nSet-Location: \nLine |\n   2 |  Get-Location; cd nonexistent-sub; Get-Location\n     |                ~~~~~~~~~~~~~~~~~~\n     | Cannot find path 'C:\\w\\nonexistent-sub' because it does not exist.\nC:\\w\n<shellId: 0 completed with exit code 0>", true, "previous folder"));
+  it("Get-Item cannot find path at exit 1 -> still silent", () =>
+    coach("powershell", { command: "Get-Item .\\x.txt" }, "Get-Item: Cannot find path 'C:\\x\\x.txt' because it does not exist.\n<shellId: 0 completed with exit code 1>", false));
+  it("ConvertFrom-Json failure after 2>&1 -> stderr diagnosis, not quoting", () => {
+    const out = g.coachResult("powershell", { command: "gh api repos/o/r 2>&1 | ConvertFrom-Json" }, "ConvertFrom-Json: Conversion from JSON failed with error: Unexpected character encountered while parsing value: g. Path '', line 0, position 0.\n<shellId: 0 completed with exit code 1>", opts);
+    assert.match(out, /2>\$null/);
+    assert.match(out, /LASTEXITCODE/);
+    assert.doesNotMatch(out, /quoting rules/);
+  });
+  it("JSONDecodeError without 2>&1 -> check the exit code and the first line", () =>
+    coach("powershell", { command: "python parse.py" }, "json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)\n<shellId: 0 completed with exit code 1>", true, "first line"));
 });
 
 // ---------------------------------------------------------------- inject-rules

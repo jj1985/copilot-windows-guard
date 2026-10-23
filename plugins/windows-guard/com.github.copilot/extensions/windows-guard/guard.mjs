@@ -321,8 +321,9 @@ export const analyzerScript = path.resolve(here, "..", "..", "..", "scripts", "a
 const HOST_ARGS = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", analyzerScript];
 const analysisCache = new Map();
 
-// A decision depends on the command, on WINDOWS_GUARD_PARSER and on PATH (installed Unix tools).
-const cacheKey = (cmd, env) => `${env.WINDOWS_GUARD_PARSER ?? ""}\0${env.PATH ?? env.Path ?? ""}\0${cmd}`;
+// A decision depends on the command, the working directory, WINDOWS_GUARD_PARSER and PATH (installed
+// Unix tools). Denials that depend on the file system (a missing cd target) are never cached.
+const cacheKey = (cmd, env, cwd) => `${env.WINDOWS_GUARD_PARSER ?? ""}\0${env.PATH ?? env.Path ?? ""}\0${cwd ?? ""}\0${cmd}`;
 
 function remember(key, decision) {
   if (analysisCache.size >= 4096) analysisCache.clear();
@@ -331,14 +332,18 @@ function remember(key, decision) {
 
 function normalizeDecision(raw) {
   if (!raw || typeof raw !== "object") return null;
-  if (raw.decision === "deny") return { decision: "deny", rule: String(raw.rule ?? ""), reason: String(raw.reason ?? "") };
+  if (raw.decision === "deny") {
+    const d = { decision: "deny", rule: String(raw.rule ?? ""), reason: String(raw.reason ?? "") };
+    if (raw.cacheable === false) d.cacheable = false;
+    return d;
+  }
   return { decision: "allow" };
 }
 
 // The analyzer's decision for one command: { decision: "allow" } or { decision: "deny", rule, reason };
 // null when the analyzer could not run.
-export async function analyzeCommand(cmd, { env = process.env, log = writeGuardLog } = {}) {
-  const key = cacheKey(cmd, env);
+export async function analyzeCommand(cmd, { env = process.env, log = writeGuardLog, cwd = "" } = {}) {
+  const key = cacheKey(cmd, env, cwd);
   if (analysisCache.has(key)) return analysisCache.get(key);
   const host = findExecutable("pwsh", env) ?? findExecutable("powershell", env);
   if (!host) return null;
@@ -346,7 +351,7 @@ export async function analyzeCommand(cmd, { env = process.env, log = writeGuardL
   let decision = null;
   try {
     fs.writeFileSync(tmp, cmd, "utf8");
-    const r = await run(host, HOST_ARGS, { env: { ...env, WG_COMMAND_FILE: tmp }, timeout: 10000 });
+    const r = await run(host, HOST_ARGS, { env: { ...env, WG_COMMAND_FILE: tmp, WG_CWD: cwd ?? "" }, timeout: 10000 });
     if (r.code === 0 && r.stdout.trim()) decision = normalizeDecision(JSON.parse(r.stdout));
     else log(`WARN analyzer exited ${r.code}: ${r.text.slice(0, 200)}`, env);
   } catch (e) {
@@ -358,21 +363,21 @@ export async function analyzeCommand(cmd, { env = process.env, log = writeGuardL
       // already gone
     }
   }
-  if (decision) remember(key, decision);
+  if (decision && decision.cacheable !== false) remember(key, decision);
   return decision;
 }
 
 // Analyzes many commands in ONE PowerShell process and fills the cache, so a replay of a large
 // corpus does not pay one process start per command. Not used on the hook path.
-export async function analyzeCommandBatch(commands, { env = process.env, log = writeGuardLog } = {}) {
-  const todo = [...new Set(commands.filter((c) => typeof c === "string" && c && !analysisCache.has(cacheKey(c, env))))];
+export async function analyzeCommandBatch(commands, { env = process.env, log = writeGuardLog, cwd = "" } = {}) {
+  const todo = [...new Set(commands.filter((c) => typeof c === "string" && c && !analysisCache.has(cacheKey(c, env, cwd))))];
   if (todo.length === 0) return 0;
   const host = findExecutable("pwsh", env) ?? findExecutable("powershell", env);
   if (!host) return 0;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wg-cmd-batch-"));
   try {
     todo.forEach((c, i) => fs.writeFileSync(path.join(dir, `${i}.txt`), c, "utf8"));
-    const r = await run(host, HOST_ARGS, { env: { ...env, WG_COMMAND_DIR: dir }, timeout: 600000 });
+    const r = await run(host, HOST_ARGS, { env: { ...env, WG_COMMAND_DIR: dir, WG_CWD: cwd ?? "" }, timeout: 600000 });
     if (r.code !== 0 || !r.stdout.trim()) {
       log(`WARN batch analyzer exited ${r.code}: ${r.text.slice(0, 200)}`, env);
       return 0;
@@ -382,7 +387,7 @@ export async function analyzeCommandBatch(commands, { env = process.env, log = w
     todo.forEach((c, i) => {
       const d = normalizeDecision(map[String(i)]);
       if (d) {
-        remember(cacheKey(c, env), d);
+        if (d.cacheable !== false) remember(cacheKey(c, env, cwd), d);
         n++;
       }
     });
@@ -400,11 +405,11 @@ export async function analyzeCommandBatch(commands, { env = process.env, log = w
 }
 
 // Mirrors shell-guard.ps1. Returns null (allow) or { permissionDecision: "deny", permissionDecisionReason }.
-export async function shellGuard(command, { env = process.env, log = writeGuardLog } = {}) {
+export async function shellGuard(command, { env = process.env, log = writeGuardLog, cwd = "" } = {}) {
   const cmd = typeof command === "string" ? command : "";
   if (!cmd) return null;
   try {
-    const d = await analyzeCommand(cmd, { env, log });
+    const d = await analyzeCommand(cmd, { env, log, cwd });
     if (d && d.decision === "deny") return { permissionDecision: "deny", permissionDecisionReason: d.reason };
   } catch (e) {
     log(`ERROR shell-guard: ${e?.message ?? e}`, env);
@@ -475,7 +480,10 @@ const EDIT_RECOVERY = [
 ].join("\n");
 
 const SHELL_FAILURE_RE =
-  /completed with exit code [1-9]|is not recognized|ParserError|missing the terminator|Unexpected token|Missing closing|Access to the path|being used by another process|running scripts is disabled|not a valid statement separator/i;
+  /completed with exit code [1-9]|is not recognized|ParserError|missing the terminator|Unexpected token|Missing closing|Access to the path|being used by another process|running scripts is disabled|not a valid statement separator|(Set-Location|Push-Location|cd|sl|chdir|pushd):[\s\S]{0,400}?Cannot find path|Conversion from JSON failed|JSONDecodeError|Expecting value|Extra data/i;
+const JSON_FAILURE_RE = /Conversion from JSON failed|JSONDecodeError|Expecting value|Extra data/i;
+// PowerShell 7 prints "Set-Location:" and "Cannot find path ..." on different lines around a "Line |" block.
+const CD_FAILURE_RE = /(Set-Location|Push-Location|cd|sl|chdir|pushd):[\s\S]{0,400}?Cannot find path .* because it does not exist/i;
 
 const UNIX_MAP_COACH = {
   sed: "the edit tool for in-place edits, or -replace",
@@ -517,13 +525,26 @@ export function advise(tool, err, toolArgs = null) {
         "The agent's shell is Windows PowerShell 5.1, where && and || are parse errors. Chain with ; instead. Installing PowerShell 7 (winget install Microsoft.PowerShell) and restarting the CLI removes this class of error.",
       );
     }
+    const jsonHit = JSON_FAILURE_RE.test(err);
+    if (jsonHit) {
+      const command = toolArgs && typeof toolArgs === "object" && typeof toolArgs.command === "string" ? toolArgs.command : "";
+      out.push(
+        /2>&1/.test(command)
+          ? "The JSON parser received stderr text because of 2>&1. Use 2>$null (or 2>$errFile) before the pipe and check $LASTEXITCODE before parsing."
+          : "The input was not valid JSON. Check $LASTEXITCODE and the first line of the output before parsing; a tool that failed usually printed a message instead of JSON.",
+      );
+    }
     if (
-      /missing the terminator|Missing closing|Unexpected token|Unrecognized token|Missing expression|Missing argument|reserved for future use|Unexpected character|ParserError/i.test(
-        err,
-      )
+      !jsonHit &&
+      /missing the terminator|Missing closing|Unexpected token|Unrecognized token|Missing expression|Missing argument|reserved for future use|ParserError/i.test(err)
     ) {
       out.push("This is a PowerShell parse error, almost always quoting.");
       out.push(QUOTING);
+    }
+    if (CD_FAILURE_RE.test(err)) {
+      out.push(
+        "A cd/Set-Location failed but the later statements still ran in the previous folder; re-check their results. Create or correct the folder, or use Set-Location X -ErrorAction Stop so a failed cd stops the line.",
+      );
     }
     if (/\/dev\/null|Cannot find path .*\//i.test(err)) {
       out.push(
@@ -657,7 +678,7 @@ export function buildHooks({ rulesDir, env = process.env, log = writeGuardLog } 
         if (SHELL_TOOLS.has(tool)) {
           const ta = getToolArgs(input);
           const cmd = ta && typeof ta === "object" ? ta.command : undefined;
-          const decision = await shellGuard(cmd, opts);
+          const decision = await shellGuard(cmd, { ...opts, cwd: input?.workingDirectory || input?.cwd || "" });
           if (decision) log(`DENIED ${tool}: ${String(cmd).slice(0, 200).replace(/\r?\n/g, " \\n ")}`, env);
           return decision ?? undefined;
         }

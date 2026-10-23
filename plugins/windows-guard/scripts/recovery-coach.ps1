@@ -32,7 +32,10 @@ Edit recovery steps (do these instead of rewriting the file):
 5. Never replace the whole file with the create tool to work around a mismatch: that converts every line ending and destroys unrelated content.
 '@
 
-$ShellFailurePattern = 'completed with exit code [1-9]|is not recognized|ParserError|missing the terminator|Unexpected token|Missing closing|Access to the path|being used by another process|running scripts is disabled|not a valid statement separator'
+$ShellFailurePattern = 'completed with exit code [1-9]|is not recognized|ParserError|missing the terminator|Unexpected token|Missing closing|Access to the path|being used by another process|running scripts is disabled|not a valid statement separator|(Set-Location|Push-Location|cd|sl|chdir|pushd):[\s\S]{0,400}?Cannot find path|Conversion from JSON failed|JSONDecodeError|Expecting value|Extra data'
+$JsonFailurePattern = 'Conversion from JSON failed|JSONDecodeError|Expecting value|Extra data'
+# PowerShell 7 prints "Set-Location:" and "Cannot find path ..." on different lines around a "Line |" block.
+$CdFailurePattern = '(Set-Location|Push-Location|cd|sl|chdir|pushd):[\s\S]{0,400}?Cannot find path .* because it does not exist'
 
 try {
     $hook = Read-HookPayload
@@ -78,9 +81,20 @@ try {
         if ($err -match 'not a valid statement separator|The token .&&.|The token .\|\|.') {
             $out += "The agent's shell is Windows PowerShell 5.1, where && and || are parse errors. Chain with ; instead. Installing PowerShell 7 (winget install Microsoft.PowerShell) and restarting the CLI removes this class of error."
         }
-        if ($err -match 'missing the terminator|Missing closing|Unexpected token|Unrecognized token|Missing expression|Missing argument|reserved for future use|Unexpected character|ParserError') {
+        $jsonHit = ($err -match $JsonFailurePattern)
+        if ($jsonHit) {
+            if ($cmd -match '2>&1') {
+                $out += 'The JSON parser received stderr text because of 2>&1. Use 2>$null (or 2>$errFile) before the pipe and check $LASTEXITCODE before parsing.'
+            } else {
+                $out += 'The input was not valid JSON. Check $LASTEXITCODE and the first line of the output before parsing; a tool that failed usually printed a message instead of JSON.'
+            }
+        }
+        if (-not $jsonHit -and $err -match 'missing the terminator|Missing closing|Unexpected token|Unrecognized token|Missing expression|Missing argument|reserved for future use|ParserError') {
             $out += 'This is a PowerShell parse error, almost always quoting.'
             $out += $Quoting
+        }
+        if ($err -match $CdFailurePattern) {
+            $out += 'A cd/Set-Location failed but the later statements still ran in the previous folder; re-check their results. Create or correct the folder, or use Set-Location X -ErrorAction Stop so a failed cd stops the line.'
         }
         if ($err -match '/dev/null|Cannot find path .*/') {
             $out += 'Forward-slash arguments such as /dev/null or /s are treated as paths. Use 2>$null, and PowerShell cmdlet parameters (-Recurse, -Force) instead of cmd.exe switches.'

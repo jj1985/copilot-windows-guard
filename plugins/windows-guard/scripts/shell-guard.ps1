@@ -20,7 +20,9 @@ try {
     if ($null -ne $ta -and $ta.PSObject -and $ta.PSObject.Properties['command']) { $cmd = [string]$ta.command }
     if (-not $cmd) { exit 0 }
 
-    $d = Get-ShellGuardDecision $cmd
+    $cwd = ''
+    if ($hook.PSObject.Properties['cwd'] -and $hook.cwd) { $cwd = [string]$hook.cwd }
+    $d = Get-ShellGuardDecision $cmd $cwd
     if ($d.decision -eq 'deny') {
         $shown = $cmd -replace '\r?\n', ' \n '
         if ($shown.Length -gt 200) { $shown = $shown.Substring(0, 200) }

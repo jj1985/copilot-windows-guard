@@ -13,7 +13,8 @@ $Scripts = Join-Path $Root 'plugins\windows-guard\scripts'
 if (-not $CorpusDir) { $CorpusDir = Join-Path $PSScriptRoot 'corpus' }
 if (-not $OutFile) { $OutFile = Join-Path $PSScriptRoot '.work\replay-ps.json' }
 if (-not $Shell) { $Shell = (Get-Process -Id $PID).Path } else { $Shell = (Get-Command $Shell).Source }
-$Work = Join-Path ([IO.Path]::GetTempPath()) ('wg-replay\' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+# Both engines replay with the same working directory, so decisions that mention it compare equal.
+$Work = Join-Path ([IO.Path]::GetTempPath().TrimEnd('\')) 'wg-replay-cwd'
 New-Item -ItemType Directory -Force -Path $Work | Out-Null
 # Same minimal PATH as the unit tests: the hook host stays reachable, Git-for-Windows head/grep do not.
 $MinPath = "$env:SystemRoot\System32;$env:SystemRoot;$(Split-Path -Parent $Shell)"

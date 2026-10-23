@@ -210,7 +210,7 @@ Test-Guard 'python -c "import json; print(json.load(open(''cfg.json''))[''name''
 Test-Guard 'gh pr comment 12 --body "Rebased onto main (head ecba1d7)"' $false
 Test-Guard "wsl bash -lc 'ls -la | head -3'" $false
 Test-Guard "Select-String -Path a.txt -Pattern '<<<<<<< HEAD'" $false
-Test-Guard 'cd "C:\build\"; Get-ChildItem' $false
+Test-Guard 'cd "C:\Windows\"; Get-ChildItem' $false
 Test-Guard 'python -c "d = {''a'': 1}; print(\"ok\")"' $true
 Test-Guard "python -c `"import os`nfor f in os.listdir('.'):`n    print(f)`"" $true 'here-string'
 Test-Guard "python -c `"import os`nprint(os.getcwd())`" # wg:allow" $false
@@ -218,6 +218,18 @@ Test-Guard 'sort < names.txt' $true 'Get-Content'
 Test-Guard 'Get-ChildItem | ForEach-Object { head $_ }' $true 'Select-Object'
 Test-Guard 'dotnet build 2> errors.txt' $true 'edit/create tool'
 Test-Guard "'x' | Set-Content -Encoding:utf8 out.txt" $false
+# Phase 3: silent wrong-directory and wrong-data failures (the hook's cwd is $Work).
+Test-Guard 'cd C:\Windows; [IO.File]::Exists(''probe.txt'')' $true 'Resolve-Path'
+Test-Guard '[IO.File]::Exists(''probe.txt'')' $false
+Test-Guard 'cd C:\Windows; [IO.File]::Exists(''C:\Windows\notepad.exe'')' $false
+Test-Guard 'cd C:\Windows; $p = ''out.txt''; [IO.File]::WriteAllText($p, ''x'')' $true 'Resolve-Path'
+Test-Guard 'cd C:\nonexistent-wg; Get-Location' $true 'ErrorAction Stop'
+Test-Guard 'cd nope-sub; Get-ChildItem' $true 'ErrorAction Stop'
+Test-Guard 'cd C:\Windows; Get-Location' $false
+Test-Guard 'cd C:\nonexistent-wg' $false
+Test-Guard 'gh api repos/o/r 2>&1 | ConvertFrom-Json' $true '2>$null'
+Test-Guard 'gh api repos/o/r 2>&1 | jq .name' $true '2>$null'
+Test-Guard 'gh api repos/o/r 2>$null | ConvertFrom-Json' $false
 
 # ---------------------------------------------------------------- utf8-gate
 Write-Host "`n--- utf8-gate.ps1"
@@ -279,6 +291,9 @@ Test-CoachResult 'powershell' @{ command = 'Get-Content x.txt' } "alpha`nbeta`n<
 Test-CoachResult 'powershell' @{ command = 'echo "a' } "ParserError: `nLine |`n   1 |  echo `"a`n     | The string is missing the terminator: `".`n<shellId: 0 completed with exit code 1>" $true 'quoting'
 Test-CoachResult 'powershell' @{ command = 'Get-Item .\does-not-exist.txt' } "Get-Item: Cannot find path 'C:\x\does-not-exist.txt' because it does not exist.`n<shellId: 0 completed with exit code 1>" $false
 Test-CoachResult 'edit' @{ path = 'a.txt' } "No match found" $false
+Test-CoachResult 'powershell' @{ command = 'cd C:\nonexistent; Get-Location' } "Set-Location: Cannot find path 'C:\nonexistent' because it does not exist.`nC:\old`n<shellId: 0 completed with exit code 0>" $true 'previous folder'
+Test-CoachResult 'powershell' @{ command = 'gh api repos/o/r 2>&1 | ConvertFrom-Json' } "ConvertFrom-Json: Conversion from JSON failed with error: Unexpected character encountered while parsing value: g. Path '', line 0, position 0.`n<shellId: 0 completed with exit code 1>" $true 'LASTEXITCODE'
+Test-CoachResult 'powershell' @{ command = 'python parse.py' } "json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)`n<shellId: 0 completed with exit code 1>" $true 'first line'
 
 # ---------------------------------------------------------------- inject-rules
 Write-Host "`n--- inject-rules.ps1"

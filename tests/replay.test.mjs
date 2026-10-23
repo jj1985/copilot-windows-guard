@@ -22,7 +22,9 @@ const outFile = path.join(workDir, "replay-node.json");
 const corpus = process.env.WINDOWS_GUARD_CORPUS_DIR ? path.resolve(process.env.WINDOWS_GUARD_CORPUS_DIR) : corpusDir;
 const baselineFile = path.join(corpus, "baseline.json");
 const isWin = process.platform === "win32";
-const work = fs.mkdtempSync(path.join(os.tmpdir(), "wg-replay-"));
+// Both engines replay with the same working directory, so decisions that mention it compare equal.
+const work = path.join(os.tmpdir(), "wg-replay-cwd");
+fs.mkdirSync(work, { recursive: true });
 
 // Same minimal PATH as the unit tests: pwsh reachable for the parser, no Git-for-Windows head/grep.
 const pwsh = g.findExecutable("pwsh") ?? g.findExecutable("powershell");
@@ -66,10 +68,10 @@ describe("replay: shell-guard over the corpus commands", () => {
     // One pwsh process analyzes the whole corpus; shellGuard then hits the decision cache.
     await g.analyzeCommandBatch(
       commands.map((r) => r.command),
-      { env, log },
+      { env, log, cwd: work },
     );
     for (const r of commands) {
-      const d = await g.shellGuard(r.command, { env, log });
+      const d = await g.shellGuard(r.command, { env, log, cwd: work });
       decisions[r.id] = { decision: d ? "deny" : "allow", reason: d?.permissionDecisionReason ?? "" };
     }
     assert.equal(Object.keys(decisions).length, commands.length);

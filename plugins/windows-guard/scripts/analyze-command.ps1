@@ -9,8 +9,10 @@
 #   - dot-sourced by shell-guard.ps1 (in-process), which calls Get-ShellGuardDecision;
 #   - run by the extension:  pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File analyze-command.ps1
 #     with the command text in the UTF-8 file named by WG_COMMAND_FILE (or many <n>.txt files in the
-#     directory named by WG_COMMAND_DIR). Prints one JSON object per command:
+#     directory named by WG_COMMAND_DIR) and the session's working directory in WG_CWD. Prints one
+#     JSON object per command:
 #       {"decision":"allow"}  or  {"decision":"deny","rule":"<tag>","reason":"<text>"}
+#     A denial that depends on the file system (a missing cd target) also carries "cacheable":false.
 #
 # Rules marked bypassable are skipped when the command contains the comment  # wg:allow .
 # WINDOWS_GUARD_PARSER=off keeps a command that does not parse from being denied for that reason
@@ -29,12 +31,18 @@ $script:UnixMap = @{
 }
 $script:WriteCmdlets = @('Set-Content', 'Add-Content', 'Out-File', 'Tee-Object')
 $script:CmdShellNames = @('dir', 'del', 'erase', 'rd', 'rmdir', 'md', 'copy', 'move', 'type', 'ren')
+$script:LocationCmds = @('cd', 'chdir', 'sl', 'set-location', 'pushd', 'push-location')
+$script:ParserCmds = @('convertfrom-json', 'jq', 'jq.exe', 'convertfrom-csv', 'convertfrom-stringdata')
 $script:InlineWriteRe = 'open\s*\([^)]*[''"][wax]b?\+?[''"]|\.write_text\s*\(|\.write_bytes\s*\(|writeFileSync\s*\(|writeFile\s*\(|appendFileSync\s*\('
+# .NET types whose path arguments resolve against the process directory, which Set-Location does not change.
+$script:DotNetPathTypes = '^(System\.)?IO\.(File|Directory|Path|StreamWriter|StreamReader|FileStream|FileInfo|DirectoryInfo)$'
 # Token kinds that continue an argument when glued to a string; separators (; | newline, parentheses) do not.
 $script:GluedKinds = @('Generic', 'StringExpandable', 'StringLiteral', 'Identifier', 'Number', 'Variable', 'SplattedVariable')
 
-function New-GuardDeny([string]$Rule, [string]$Reason) {
-    return @{ decision = 'deny'; rule = $Rule; reason = $Reason }
+function New-GuardDeny([string]$Rule, [string]$Reason, [bool]$Cacheable = $true) {
+    $d = @{ decision = 'deny'; rule = $Rule; reason = $Reason }
+    if (-not $Cacheable) { $d.cacheable = $false }
+    return $d
 }
 
 function Get-GuardElementText($Element) {
@@ -53,7 +61,8 @@ function Get-GuardParameterValue($Command, [string]$ParameterName) {
         $el = $els[$i]
         if (-not ($el -is [System.Management.Automation.Language.CommandParameterAst])) { continue }
         $n = [string]$el.ParameterName
-        if ($n.Length -lt 2 -or -not $ParameterName.StartsWith($n, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        $exact = ($n -ieq $ParameterName)
+        if (-not $exact -and ($n.Length -lt 2 -or -not $ParameterName.StartsWith($n, [StringComparison]::OrdinalIgnoreCase))) { continue }
         if ($null -ne $el.Argument) { return (Get-GuardElementText $el.Argument) }
         if (($i + 1) -lt $els.Count -and -not ($els[$i + 1] -is [System.Management.Automation.Language.CommandParameterAst])) { return (Get-GuardElementText $els[$i + 1]) }
         return ''
@@ -61,7 +70,57 @@ function Get-GuardParameterValue($Command, [string]$ParameterName) {
     return $null
 }
 
-function Get-ShellGuardDecision([string]$Command) {
+function Get-GuardPositionalArgs($Command) {
+    # Positional (non-parameter) arguments of a command, in order.
+    $out = @()
+    $els = @($Command.CommandElements)
+    for ($i = 1; $i -lt $els.Count; $i++) {
+        $el = $els[$i]
+        if ($el -is [System.Management.Automation.Language.CommandParameterAst]) {
+            # -Name value consumes the value; -Switch does not. Treat the next element as consumed when the
+            # parameter is one of the path parameters of the location cmdlets.
+            $n = ([string]$el.ParameterName).ToLowerInvariant()
+            if ($null -eq $el.Argument -and ($n -eq 'path' -or $n -eq 'literalpath' -or $n -eq 'p' -or $n -eq 'lp')) { $i++ }
+            continue
+        }
+        $out += , $el
+    }
+    return $out
+}
+
+function Test-GuardRelativePathValue($Ast, $Assignments, [int]$Before) {
+    # True when the argument is a relative file-system path: a string constant that is not rooted, an
+    # expandable string that is not rooted and does not start from $PWD, or a variable that an earlier
+    # statement assigned such a constant.
+    if ($null -eq $Ast) { return $false }
+    if ($Ast -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
+        $v = [string]$Ast.Value
+        if (-not $v -or $v -match '^[A-Za-z]+:' -or [IO.Path]::IsPathRooted($v)) { return $false }
+        return $true
+    }
+    if ($Ast -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) {
+        $v = [string]$Ast.Value
+        if (-not $v -or $v -match '^\$\{?(PWD|pwd|HOME|home|env:)' -or $v -match '^[A-Za-z]+:' -or [IO.Path]::IsPathRooted($v)) { return $false }
+        if ($Ast.NestedExpressions.Count -gt 0) { return $false }   # another variable decides the root; stay quiet
+        return $true
+    }
+    if ($Ast -is [System.Management.Automation.Language.VariableExpressionAst]) {
+        $name = [string]$Ast.VariablePath.UserPath
+        foreach ($a in $Assignments) {
+            if ($a.Extent.StartOffset -ge $Before) { continue }
+            $left = $a.Left
+            if (-not ($left -is [System.Management.Automation.Language.VariableExpressionAst]) -or [string]$left.VariablePath.UserPath -ne $name) { continue }
+            $right = $a.Right
+            if ($right -is [System.Management.Automation.Language.PipelineAst] -and $right.PipelineElements.Count -eq 1) { $right = $right.PipelineElements[0] }
+            if ($right -is [System.Management.Automation.Language.CommandExpressionAst]) { $right = $right.Expression }
+            if (Test-GuardRelativePathValue $right $Assignments $a.Extent.StartOffset) { return $true }
+        }
+        return $false
+    }
+    return $false
+}
+
+function Get-ShellGuardDecision([string]$Command, [string]$Cwd = '') {
     $cmd = $Command
     if (-not $cmd) { return @{ decision = 'allow' } }
     $bypass = ($cmd -match '#\s*wg:allow')
@@ -84,6 +143,7 @@ function Get-ShellGuardDecision([string]$Command) {
     $commands = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true))
     $redirects = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FileRedirectionAst] }, $true))
     $assignments = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true))
+    $pipelines = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.PipelineAst] }, $true))
 
     # 2. Redirects to a file. Only real redirection operators count; 2>&1 is a stream merge, not a file.
     foreach ($r in $redirects) {
@@ -164,7 +224,98 @@ function Get-ShellGuardDecision([string]$Command) {
         }
     }
 
-    # 9. Unix commands in command position (at any depth), unless the executable is actually installed.
+    # 9. .NET path calls after a location change. Set-Location moves PowerShell's location only; .NET
+    #    resolves a relative path against [Environment]::CurrentDirectory, the folder the session started
+    #    in, so [IO.File]::Exists('x') after cd reads the wrong place and reports success (bypassable).
+    $firstLocationChange = -1
+    foreach ($c in $commands) {
+        $n = [string]$c.GetCommandName()
+        if ($n -and $script:LocationCmds -contains $n.ToLowerInvariant()) {
+            if ($firstLocationChange -lt 0 -or $c.Extent.StartOffset -lt $firstLocationChange) { $firstLocationChange = $c.Extent.StartOffset }
+        }
+    }
+    if ($firstLocationChange -ge 0 -and -not $bypass) {
+        $invokes = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
+        foreach ($m in $invokes) {
+            if ($m.Extent.StartOffset -lt $firstLocationChange) { continue }
+            $typeExpr = $m.Expression
+            if (-not ($typeExpr -is [System.Management.Automation.Language.TypeExpressionAst])) { continue }
+            $typeName = [string]$typeExpr.TypeName.FullName
+            if ($typeName -notmatch $script:DotNetPathTypes) { continue }
+            $first = $null
+            if ($m.Arguments -and $m.Arguments.Count -gt 0) { $first = $m.Arguments[0] }
+            if (Test-GuardRelativePathValue $first $assignments $m.Extent.StartOffset) {
+                return New-GuardDeny 'dotnet-relative-path' ".NET calls ignore cd: [$typeName] resolves a relative path against the folder the session started in ([Environment]::CurrentDirectory), not the folder you changed to, so this reads or writes the wrong file and reports success. Use (Resolve-Path 'x').Path, `"`$PWD\x`" or an absolute path. Add  # wg:allow  if this is intentional."
+            }
+        }
+    }
+
+    # 10. A missing cd target as the first statement: the cd fails, the rest of the line runs in the
+    #     old folder, and the exit code is 0 (bypassable; not cacheable, the folder may appear later).
+    if (-not $bypass -and $ast.EndBlock -and $ast.EndBlock.Statements.Count -gt 1) {
+        $firstStmt = $ast.EndBlock.Statements[0]
+        $firstCmd = $null
+        if ($firstStmt -is [System.Management.Automation.Language.PipelineAst] -and $firstStmt.PipelineElements.Count -eq 1 -and $firstStmt.PipelineElements[0] -is [System.Management.Automation.Language.CommandAst]) {
+            $firstCmd = $firstStmt.PipelineElements[0]
+        }
+        if ($null -ne $firstCmd) {
+            $n = [string]$firstCmd.GetCommandName()
+            if ($n -and $script:LocationCmds -contains $n.ToLowerInvariant()) {
+                $targetAst = $null
+                $byParam = Get-GuardParameterValue $firstCmd 'LiteralPath'
+                if ($null -eq $byParam) { $byParam = Get-GuardParameterValue $firstCmd 'Path' }
+                $target = $null
+                if ($null -ne $byParam) { $target = [string]$byParam }
+                else {
+                    $pos = @(Get-GuardPositionalArgs $firstCmd)
+                    if ($pos.Count -gt 0) { $targetAst = $pos[0] }
+                    if ($targetAst -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $target = [string]$targetAst.Value }
+                }
+                if ($target -and $target -notmatch '^[~-]' -and $target -notmatch '^[A-Za-z]+::' -and $target -notmatch '[*?\[]') {
+                    $full = $target
+                    if (-not [IO.Path]::IsPathRooted($full) -and $Cwd) { $full = Join-Path $Cwd $full }
+                    $exists = $true
+                    try { $exists = Test-Path -LiteralPath $full -PathType Container } catch { $exists = $true }
+                    if (-not $exists) {
+                        $where = $Cwd; if (-not $where) { $where = 'the current folder' }
+                        return (New-GuardDeny 'missing-cd-target' "The first statement changes directory to '$target', which does not exist under $where, so the cd fails and the rest of the line runs in the old folder with exit code 0. Create or correct the folder first, or use Set-Location '$target' -ErrorAction Stop so a failed cd stops the line. Add  # wg:allow  if this is intentional." $false)
+                    }
+                }
+            }
+        }
+    }
+
+    # 11. stderr merged into a parser: 2>&1 in a pipeline element that feeds ConvertFrom-Json, jq or
+    #     an interpreter reading JSON from stdin, so error text corrupts the input (bypassable).
+    if (-not $bypass) {
+        foreach ($p in $pipelines) {
+            $els = @($p.PipelineElements)
+            $mergedAt = -1
+            for ($i = 0; $i -lt $els.Count; $i++) {
+                $el = $els[$i]
+                if ($mergedAt -lt 0 -and $el.Redirections) {
+                    foreach ($r in $el.Redirections) {
+                        if ($r -is [System.Management.Automation.Language.MergingRedirectionAst]) { $mergedAt = $i; break }
+                    }
+                    continue
+                }
+                if ($mergedAt -lt 0) { continue }
+                if (-not ($el -is [System.Management.Automation.Language.CommandAst])) { continue }
+                $n = ([string]$el.GetCommandName()).ToLowerInvariant()
+                $isParser = $script:ParserCmds -contains $n
+                if (-not $isParser -and $n -match '^(python3?|py|node)(\.exe)?$') {
+                    $code = Get-GuardParameterValue $el 'c'
+                    if ($null -eq $code) { $code = Get-GuardParameterValue $el 'e' }
+                    if ($code -and $code -match 'json\.loads?\s*\(|JSON\.parse\s*\(') { $isParser = $true }
+                }
+                if ($isParser) {
+                    return New-GuardDeny 'stderr-into-parser' 'This pipes stderr into a parser (2>&1 before ConvertFrom-Json, jq or json.load): error text corrupts the JSON and the parse fails or lies. Use 2>$null (or 2>$errFile) before the pipe and check $LASTEXITCODE before parsing. Add  # wg:allow  if the merge is intentional.'
+                }
+            }
+        }
+    }
+
+    # 12. Unix commands in command position (at any depth), unless the executable is actually installed.
     foreach ($c in $commands) {
         $name = [string]$c.GetCommandName()
         if (-not $name) { continue }
@@ -178,7 +329,7 @@ function Get-ShellGuardDecision([string]$Command) {
         return New-GuardDeny 'unix-command' "'$name' is a Unix command and is not installed in this PowerShell session. Use $($script:UnixMap[$lower]). For in-place file edits use the edit tool, not sed. Add  # wg:allow  if you have confirmed the tool exists."
     }
 
-    # 10. Bash-style escaped quotes. A \" inside a double-quoted string ends the string early, so the
+    # 13. Bash-style escaped quotes. A \" inside a double-quoted string ends the string early, so the
     #     real sign is a double-quoted token that ends in \" with another token glued right after it
     #     (or a bare token ending in \ glued before it). A path that merely ends in a backslash,
     #     "C:\dir\", has nothing glued to it and passes. Single-quoted strings are literal and pass.
@@ -195,7 +346,7 @@ function Get-ShellGuardDecision([string]$Command) {
         }
     }
 
-    # 11. Anything else the parser rejects: unterminated strings, bash for/[ ] syntax, mismatched braces.
+    # 14. Anything else the parser rejects: unterminated strings, bash for/[ ] syntax, mismatched braces.
     if ($errs.Count -gt 0 -and $env:WINDOWS_GUARD_PARSER -ne 'off') {
         $msgs = @($errs | Select-Object -First 3 | ForEach-Object { $_.Message.Trim() }) -join ' | '
         return New-GuardDeny 'parser' "PowerShell cannot parse this command: $msgs. $script:CheatSheet"
@@ -208,15 +359,16 @@ function Get-ShellGuardDecision([string]$Command) {
 if ($MyInvocation.InvocationName -ne '.') {
     try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
     $enc = New-Object System.Text.UTF8Encoding($false)
+    $cwd = [string]$env:WG_CWD
     try {
         if ($env:WG_COMMAND_DIR) {
             $o = @{}
             foreach ($f in Get-ChildItem -LiteralPath $env:WG_COMMAND_DIR -Filter *.txt) {
-                $o[$f.BaseName] = Get-ShellGuardDecision ([IO.File]::ReadAllText($f.FullName, $enc))
+                $o[$f.BaseName] = Get-ShellGuardDecision ([IO.File]::ReadAllText($f.FullName, $enc)) $cwd
             }
             $o | ConvertTo-Json -Compress -Depth 4
         } elseif ($env:WG_COMMAND_FILE) {
-            Get-ShellGuardDecision ([IO.File]::ReadAllText($env:WG_COMMAND_FILE, $enc)) | ConvertTo-Json -Compress -Depth 4
+            Get-ShellGuardDecision ([IO.File]::ReadAllText($env:WG_COMMAND_FILE, $enc)) $cwd | ConvertTo-Json -Compress -Depth 4
         }
     } catch {
         # Fail open: no output means allow. The caller logs the exit code.
