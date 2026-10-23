@@ -1,13 +1,13 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "windows-guard",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Stops GitHub Copilot CLI from corrupting files on Windows. Restores line endings and strips BOMs after every edit, blocks bash-isms and unsafe shell writes in PowerShell, refuses edits that would destroy non-UTF-8 files, and coaches the model through quoting and edit-match failures instead of letting it rewrite whole files.",
   "author": {
     "name": "jj1985",
     "url": "https://github.com/jj1985"
   },
-  "homepage": "https://github.com/jj1985/copilot-windows-guard",
+  "homepage": "https://github.com/jj1985/copilot-windows-guard/tree/experimental",
   "repository": "https://github.com/jj1985/copilot-windows-guard",
   "license": "MIT",
   "keywords": [
@@ -19,6 +19,7 @@
     "utf-8",
     "quoting",
     "hooks",
-    "copilot-cli"
+    "copilot-cli",
+    "extension"
   ]
 }

@@ -17,6 +17,9 @@ try {
     }
     if ($parts.Count -eq 0) { exit 0 }
     $text = ($parts -join "`n`n")
+    if (-not $env:PYTHONUTF8) {
+        $text += "`n`nNote: PYTHONUTF8 is not set in this environment. Python fails with UnicodeEncodeError ('charmap') when it prints non-ASCII text; set `$env:PYTHONUTF8 = '1' before running Python (or permanently with: setx PYTHONUTF8 1)."
+    }
     if (Test-GuardDebug) { Write-GuardLog "INJECTED rules ($($text.Length) chars)" }
     @{ additionalContext = $text } | ConvertTo-Json -Compress
 } catch {

@@ -200,8 +200,36 @@ Test-Guard '$x = 5; Write-Output "x is $x"' $false
 Test-Guard 'node -e "console.log(1)"' $false
 Test-Guard 'npm run build -- ''{\"a\":1}''' $false
 Test-Guard '[IO.File]::WriteAllText(''x.txt'', ''hi'', [Text.UTF8Encoding]::new($false))' $false
-Test-Guard 'Get-Content x | Select-String -Pattern "a>b"' $true
+Test-Guard 'Get-Content x | Select-String -Pattern "a>b"' $false
 Test-Guard 'Get-Content x | Select-String -Pattern "a>b" # wg:allow' $false
+# AST rules: text inside strings and here-strings is content, not syntax.
+Test-Guard "Select-String -Path log.txt -Pattern '<[^>]+>'" $false
+Test-Guard 'Write-Output "key => value"' $false
+Test-Guard "@'`nif i >= 0:`n    print(i)`n'@ | python -" $false
+Test-Guard 'python -c "import json; print(json.load(open(''cfg.json''))[''name''])"' $false
+Test-Guard 'gh pr comment 12 --body "Rebased onto main (head ecba1d7)"' $false
+Test-Guard "wsl bash -lc 'ls -la | head -3'" $false
+Test-Guard "Select-String -Path a.txt -Pattern '<<<<<<< HEAD'" $false
+Test-Guard 'cd "C:\Windows\"; Get-ChildItem' $false
+Test-Guard 'python -c "d = {''a'': 1}; print(\"ok\")"' $true
+Test-Guard "python -c `"import os`nfor f in os.listdir('.'):`n    print(f)`"" $true 'here-string'
+Test-Guard "python -c `"import os`nprint(os.getcwd())`" # wg:allow" $false
+Test-Guard 'sort < names.txt' $true 'Get-Content'
+Test-Guard 'Get-ChildItem | ForEach-Object { head $_ }' $true 'Select-Object'
+Test-Guard 'dotnet build 2> errors.txt' $true 'edit/create tool'
+Test-Guard "'x' | Set-Content -Encoding:utf8 out.txt" $false
+# Phase 3: silent wrong-directory and wrong-data failures (the hook's cwd is $Work).
+Test-Guard 'cd C:\Windows; [IO.File]::Exists(''probe.txt'')' $true 'Resolve-Path'
+Test-Guard '[IO.File]::Exists(''probe.txt'')' $false
+Test-Guard 'cd C:\Windows; [IO.File]::Exists(''C:\Windows\notepad.exe'')' $false
+Test-Guard 'cd C:\Windows; $p = ''out.txt''; [IO.File]::WriteAllText($p, ''x'')' $true 'Resolve-Path'
+Test-Guard 'cd C:\nonexistent-wg; Get-Location' $true 'ErrorAction Stop'
+Test-Guard 'cd nope-sub; Get-ChildItem' $true 'ErrorAction Stop'
+Test-Guard 'cd C:\Windows; Get-Location' $false
+Test-Guard 'cd C:\nonexistent-wg' $false
+Test-Guard 'gh api repos/o/r 2>&1 | ConvertFrom-Json' $true '2>$null'
+Test-Guard 'gh api repos/o/r 2>&1 | jq .name' $true '2>$null'
+Test-Guard 'gh api repos/o/r 2>$null | ConvertFrom-Json' $false
 
 # ---------------------------------------------------------------- utf8-gate
 Write-Host "`n--- utf8-gate.ps1"
@@ -228,8 +256,12 @@ Test-Gate 'does-not-exist.txt' $false
 Write-Host "`n--- recovery-coach.ps1"
 function Test-Coach([string]$Tool, $ToolArgs, [string]$Err, [bool]$ExpectAdvice, [string]$Hint = '') {
     $r = Invoke-Hook 'recovery-coach.ps1' (@{ sessionId = 's'; timestamp = 1; cwd = $Work; toolName = $Tool; toolArgs = ($ToolArgs | ConvertTo-Json -Compress); error = $Err })
-    $hintOk = (-not $Hint) -or ($r.Out.IndexOf($Hint, [StringComparison]::OrdinalIgnoreCase) -ge 0)
-    if ($ExpectAdvice) { $ok = ($r.Code -eq 2) -and $r.Out -and $hintOk } else { $ok = ($r.Code -eq 0) -and (-not $r.Out) }
+    # postToolUseFailure answers with {"additionalContext": "..."} and exit 0: on CLI 1.0.103 that is the only
+    # form that reaches the model (plain text or JSON with exit 2 is logged but never delivered).
+    $ctx = ''
+    try { $ctx = [string](($r.Out | ConvertFrom-Json).additionalContext) } catch { }
+    $hintOk = (-not $Hint) -or ($ctx.IndexOf($Hint, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+    if ($ExpectAdvice) { $ok = ($r.Code -eq 0) -and $ctx -and $hintOk } else { $ok = ($r.Code -eq 0) -and (-not $r.Out) }
     Assert $ok "coach $Tool : $Err" "code=$($r.Code) out=$($r.Out)"
 }
 Test-Coach 'powershell' @{ command = 'head -5 x' } "head: The term 'head' is not recognized as a name of a cmdlet, function, script file, or executable program." $true 'Select-Object'
@@ -238,6 +270,8 @@ Test-Coach 'powershell' @{ command = 'a && b' } "The token '&&' is not a valid s
 Test-Coach 'powershell' @{ command = 'npm run x' } "npm ERR! missing script: x" $false
 Test-Coach 'edit' @{ path = 'a.txt'; old_str = 'x'; new_str = 'y' } "No match found for old_str in a.txt" $true 'view'
 Test-Coach 'edit' @{ path = 'a.txt' } "Something unrelated happened" $false
+Test-Coach 'create' @{ path = (Join-Path $Work 'newdir/sub/f.txt'); file_text = 'x' } "Parent directory does not exist" $true 'New-Item -ItemType Directory -Force'
+Test-Coach 'create' @{ path = (Join-Path $Work 'a.txt'); file_text = 'x' } "File already exists" $true 'never delete'
 Test-Coach 'view' @{ path = 'a.txt' } "File not found" $false
 Test-Coach 'powershell' @{ command = 'echo "a' } "Denied by preToolUse hook: PowerShell cannot parse this command: The string is missing the terminator. PowerShell quoting: ..." $false
 
@@ -257,6 +291,20 @@ Test-CoachResult 'powershell' @{ command = 'Get-Content x.txt' } "alpha`nbeta`n<
 Test-CoachResult 'powershell' @{ command = 'echo "a' } "ParserError: `nLine |`n   1 |  echo `"a`n     | The string is missing the terminator: `".`n<shellId: 0 completed with exit code 1>" $true 'quoting'
 Test-CoachResult 'powershell' @{ command = 'Get-Item .\does-not-exist.txt' } "Get-Item: Cannot find path 'C:\x\does-not-exist.txt' because it does not exist.`n<shellId: 0 completed with exit code 1>" $false
 Test-CoachResult 'edit' @{ path = 'a.txt' } "No match found" $false
+Test-CoachResult 'powershell' @{ command = 'cd C:\nonexistent; Get-Location' } "Set-Location: Cannot find path 'C:\nonexistent' because it does not exist.`nC:\old`n<shellId: 0 completed with exit code 0>" $true 'previous folder'
+Test-CoachResult 'powershell' @{ command = 'gh api repos/o/r 2>&1 | ConvertFrom-Json' } "ConvertFrom-Json: Conversion from JSON failed with error: Unexpected character encountered while parsing value: g. Path '', line 0, position 0.`n<shellId: 0 completed with exit code 1>" $true 'LASTEXITCODE'
+Test-CoachResult 'powershell' @{ command = 'python parse.py' } "json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)`n<shellId: 0 completed with exit code 1>" $true 'first line'
+# Phase 4: exit-code and error-shape gating, benign exits, new branches.
+Test-CoachResult 'powershell' @{ command = 'Select-String -Path src\a.js -Pattern Unexpected' } "src\a.js:12:  // Unexpected token in parser`n<shellId: 0 completed with exit code 0>" $false
+Test-CoachResult 'powershell' @{ command = 'echo "a' } "At line:1 char:6`n+ echo `"a`n+      ~~`nThe string is missing the terminator: `".`n<shellId: 0 completed with exit code 1>" $true 'quoting'
+Test-CoachResult 'powershell' @{ command = 'git grep -n "TODO"' } "<shellId: 0 completed with exit code 1>" $true 'no match'
+Test-CoachResult 'powershell' @{ command = 'gh pr checks 12' } "build  pending  0  https://example.com/checks/1`n<shellId: 0 completed with exit code 8>" $true 'pending'
+Test-CoachResult 'powershell' @{ command = 'Get-Item a.txt, missing.txt -ErrorAction SilentlyContinue' } "a.txt`n<shellId: 0 completed with exit code 1>" $true 'output above is valid'
+Test-CoachResult 'powershell' @{ command = 'python report.py' } "UnicodeEncodeError: 'charmap' codec can't encode character '\u2713' in position 0: character maps to <undefined>`n<shellId: 0 completed with exit code 1>" $true 'PYTHONUTF8'
+Test-CoachResult 'powershell' @{ command = 'python tool.py' } "ModuleNotFoundError: No module named 'requests'`n<shellId: 0 completed with exit code 1>" $true 'uv run --no-project --with requests'
+Test-CoachResult 'powershell' @{ command = 'pytest' } "Failed to spawn: \pytest`n<shellId: 0 completed with exit code 1>" $true 'uv run --with pytest pytest'
+Test-CoachResult 'powershell' @{ command = 'git rev-parse --short a1b2c3 d4e5f6' } "fatal: Needed a single revision`n<shellId: 0 completed with exit code 128>" $true 'one ref'
+Test-CoachResult 'powershell' @{ command = 'rg -n TODO src\*.py' } "rg: src\*.py: The filename, directory name, or volume label syntax is incorrect. (os error 123)`n<shellId: 0 completed with exit code 2>" $true 'Get-ChildItem'
 
 # ---------------------------------------------------------------- inject-rules
 Write-Host "`n--- inject-rules.ps1"
@@ -264,13 +312,19 @@ $r = Invoke-Hook 'inject-rules.ps1' (@{ sessionId = 's'; timestamp = 1; cwd = $W
 $ctx = ''
 try { $ctx = [string](($r.Out | ConvertFrom-Json).additionalContext) } catch { }
 Assert (($r.Code -eq 0) -and ($ctx -like '*Windows environment rules*') -and ($ctx -like '*edit and create tools*')) 'sessionStart injects the rules file as additionalContext' "code=$($r.Code) out=$($r.Out.Substring(0, [Math]::Min(200, $r.Out.Length)))"
+$r = Invoke-Hook 'inject-rules.ps1' (@{ sessionId = 's'; timestamp = 1; cwd = $Work; source = 'startup' }) @{ PYTHONUTF8 = $null }
+$ctx = ''; try { $ctx = [string](($r.Out | ConvertFrom-Json).additionalContext) } catch { }
+Assert ($ctx -like '*PYTHONUTF8 is not set*') 'sessionStart adds the PYTHONUTF8 note when the variable is unset' "out=$($r.Out.Substring(0, [Math]::Min(200, $r.Out.Length)))"
+$r = Invoke-Hook 'inject-rules.ps1' (@{ sessionId = 's'; timestamp = 1; cwd = $Work; source = 'startup' }) @{ PYTHONUTF8 = '1' }
+$ctx = ''; try { $ctx = [string](($r.Out | ConvertFrom-Json).additionalContext) } catch { }
+Assert ($ctx -and ($ctx -notlike '*PYTHONUTF8 is not set*')) 'sessionStart omits the PYTHONUTF8 note when the variable is set' "out=$($r.Out.Substring(0, [Math]::Min(200, $r.Out.Length)))"
 
 # ---------------------------------------------------------------- hooks.json launcher end-to-end
 Write-Host "`n--- hooks.json inline launcher"
 $hooks = Get-Content -Raw (Join-Path $PluginDir 'com.github.copilot\hooks\hooks.json') | ConvertFrom-Json
 $launcher = $hooks.hooks.preToolUse[0].powershell
 $payload = @{ sessionId = 's'; timestamp = 1; cwd = $Work; toolName = 'powershell'; toolArgs = (@{ command = 'head -3 x' } | ConvertTo-Json -Compress) } | ConvertTo-Json -Compress
-$savedRoot = $env:PLUGIN_ROOT; $savedPath = $env:PATH
+$savedRoot = $env:PLUGIN_ROOT; $savedPath = $env:PATH; $savedMode = $env:WINDOWS_GUARD_MODE; $savedLocal = $env:LOCALAPPDATA
 try {
     $env:PLUGIN_ROOT = $PluginDir; $env:PATH = $MinPath
     $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -281,13 +335,32 @@ try {
     $out = ($payload | & $Shell -NoProfile -NonInteractive -Command $launcher 2>&1 | ForEach-Object { "$_" }) -join "`n"
     $code = $LASTEXITCODE
     Assert ((-not $out) -and $code -eq 0) 'launcher without PLUGIN_ROOT exits 0 silently (fail-open)' "code=$code out=$out"
+    # Opt-out switch: with WINDOWS_GUARD_MODE=extension the launcher reads the payload's sessionId
+    # and looks for %LOCALAPPDATA%\copilot-windows-guard\active\<sessionId>, written by the extension
+    # and holding its PID. Live PID -> exit 0 silently. Missing marker or dead PID -> the script runs,
+    # so protection never depends on the extension actually having loaded.
+    $env:PLUGIN_ROOT = $PluginDir; $env:WINDOWS_GUARD_MODE = 'extension'; $env:LOCALAPPDATA = $Work
+    $markerDir = Join-Path $Work 'copilot-windows-guard\active'; New-Item -ItemType Directory -Force -Path $markerDir | Out-Null
+    $marker = Join-Path $markerDir 's'
+    $out = ($payload | & $Shell -NoProfile -NonInteractive -Command $launcher 2>&1 | ForEach-Object { "$_" }) -join "`n"
+    $code = $LASTEXITCODE
+    Assert (($out -match '"deny"') -and $code -eq 0) 'launcher with WINDOWS_GUARD_MODE=extension but no extension marker falls back to the script' "code=$code out=$out"
+    [IO.File]::WriteAllText($marker, "$PID`n")
+    $out = ($payload | & $Shell -NoProfile -NonInteractive -Command $launcher 2>&1 | ForEach-Object { "$_" }) -join "`n"
+    $code = $LASTEXITCODE
+    Assert ((-not $out) -and $code -eq 0) 'launcher with WINDOWS_GUARD_MODE=extension and a live extension marker exits 0 silently' "code=$code out=$out"
+    [IO.File]::WriteAllText($marker, "999999`n")
+    $out = ($payload | & $Shell -NoProfile -NonInteractive -Command $launcher 2>&1 | ForEach-Object { "$_" }) -join "`n"
+    $code = $LASTEXITCODE
+    Assert (($out -match '"deny"') -and $code -eq 0) 'launcher with WINDOWS_GUARD_MODE=extension and a dead-PID marker falls back to the script' "code=$code out=$out"
+    $env:WINDOWS_GUARD_MODE = $null; $env:LOCALAPPDATA = $savedLocal
     $env:PLUGIN_ROOT = $PluginDir
     $coach = $hooks.hooks.postToolUseFailure[0].powershell
     $failPayload = @{ sessionId = 's'; timestamp = 1; cwd = $Work; toolName = 'edit'; toolArgs = '{"path":"a.txt"}'; error = 'No match found' } | ConvertTo-Json -Compress
     $out = ($failPayload | & $Shell -NoProfile -NonInteractive -Command $coach 2>&1 | ForEach-Object { "$_" }) -join "`n"
     $code = $LASTEXITCODE
-    Assert (($out -match 'view') -and $code -eq 2) 'launcher relays recovery-coach exit code 2 and text' "code=$code out=$out"
-} finally { $env:PLUGIN_ROOT = $savedRoot; $env:PATH = $savedPath }
+    Assert (($out -match '"additionalContext"') -and ($out -match 'view') -and $code -eq 0) 'launcher relays recovery-coach additionalContext JSON with exit 0' "code=$code out=$out"
+} finally { $env:PLUGIN_ROOT = $savedRoot; $env:PATH = $savedPath; $env:WINDOWS_GUARD_MODE = $savedMode; $env:LOCALAPPDATA = $savedLocal }
 
 # ---------------------------------------------------------------- summary
 Write-Host "`n$($script:Pass) passed, $($script:Fail) failed"

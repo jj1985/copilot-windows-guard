@@ -4,7 +4,9 @@
 #     where ordinary command errors are visible. Output: {"additionalContext": "..."} with exit 0,
 #     which the CLI appends to the tool output the model sees on the same turn.
 #   - postToolUseFailure on all tools: edit-tool failures and other tool-level errors arrive here
-#     with an `error` field. Output: plain text with exit 2, which the CLI appends to the failure.
+#     with an `error` field. Output: {"additionalContext": "..."} with exit 0. The CLI hooks reference
+#     documents exit 2 plus plain text for this event, but on CLI 1.0.103 neither plain text nor JSON with
+#     exit 2 reaches the model; only JSON with exit 0 does (verified live 2026-10-23).
 # Recognizes quoting errors, bash-isms, 5.1 syntax, "No match found" and a few environment errors,
 # and always tells the model NOT to fall back to rewriting whole files. Unrecognized -> exit 0, silent.
 $ErrorActionPreference = 'Stop'
@@ -30,7 +32,12 @@ Edit recovery steps (do these instead of rewriting the file):
 5. Never replace the whole file with the create tool to work around a mismatch: that converts every line ending and destroys unrelated content.
 '@
 
-$ShellFailurePattern = 'completed with exit code [1-9]|is not recognized|ParserError|missing the terminator|Unexpected token|Missing closing|Access to the path|being used by another process|running scripts is disabled|not a valid statement separator'
+$ShellFailurePattern = 'completed with exit code [1-9]|is not recognized|ParserError|missing the terminator|Unexpected token|Missing closing|Access to the path|being used by another process|running scripts is disabled|not a valid statement separator|(Set-Location|Push-Location|cd|sl|chdir|pushd):[\s\S]{0,400}?Cannot find path|Conversion from JSON failed|JSONDecodeError|Expecting value|Extra data'
+$JsonFailurePattern = 'Conversion from JSON failed|JSONDecodeError|Expecting value|Extra data'
+# PowerShell 7 prints "Set-Location:" and "Cannot find path ..." on different lines around a "Line |" block.
+$CdFailurePattern = '(Set-Location|Push-Location|cd|sl|chdir|pushd):[\s\S]{0,400}?Cannot find path .* because it does not exist'
+# PowerShell's own error layout: 7 prints "Line |" with a ~~~ marker, 5.1 prints "At line:N char:N".
+$PsErrorShape = 'ParserError:|Line \|[\s\S]{0,300}?~|At line:\d+ char:\d+'
 
 try {
     $hook = Read-HookPayload
@@ -52,12 +59,23 @@ try {
         if ($err -notmatch $ShellFailurePattern) { exit 0 }
     } else { exit 0 }
     if ($err -match '^Denied by preToolUse hook') { exit 0 }    # the denial reason already carries the guidance
+    # Result mode: the exit code and the output before the <shellId> marker decide what is an error.
+    $exitCode = $null
+    $body = $err
+    if ($mode -eq 'result' -and $err -match '<shellId: \d+ completed with exit code (\d+)>') {
+        $exitCode = [int]$Matches[1]
+        $body = $err.Substring(0, $err.IndexOf('<shellId:')).Trim()
+    }
 
     $cmd = ''
     if ($null -ne $ta -and $ta.PSObject -and $ta.PSObject.Properties['command']) { $cmd = [string]$ta.command }
     $out = @()
 
     if ($tool -eq 'bash' -or $tool -eq 'powershell') {
+        $isResult = ($mode -eq 'result')
+        # In result mode a non-zero exit code is the failure signal; in failure mode the tool itself failed.
+        $failed = (-not $isResult) -or ($null -eq $exitCode) -or ($exitCode -ne 0)
+        $hasErrorShape = ($err -match $PsErrorShape)
         $unixMap = @{
             sed = 'the edit tool for in-place edits, or -replace'; awk = 'ForEach-Object / -split'; grep = 'Select-String'
             head = 'Select-Object -First N'; tail = 'Get-Content -Tail N'; touch = 'New-Item -ItemType File'
@@ -65,48 +83,100 @@ try {
             ln = 'New-Item -ItemType SymbolicLink'; wc = 'Measure-Object'; xargs = 'ForEach-Object'; find = 'Get-ChildItem -Recurse'
             cut = '-split'; tr = '-replace'; uniq = 'Sort-Object -Unique'
         }
-        if ($err -match "The term '([^']+)' is not recognized") {
-            $term = $Matches[1]
-            if ($unixMap.ContainsKey($term)) {
-                $out += "'$term' is a Unix command; this shell is PowerShell on Windows. Use $($unixMap[$term])."
-            } else {
-                $out += "'$term' is not on PATH for the agent's shell (a fresh pwsh -NoProfile per command; your interactive profile does not apply). Check with Get-Command $term, or call the executable by full path."
+        # Benign exit codes are the whole answer.
+        if ($isResult -and $exitCode -eq 1 -and $cmd -match '(^|[|;&(\s])(git\s+grep|rg|grep|findstr|Select-String)\b' -and -not $body) {
+            $out += 'Exit code 1 from a search command with no output means no match, not an error.'
+        }
+        elseif ($isResult -and $exitCode -eq 8 -and $cmd -match '\bgh\s+pr\s+checks\b') {
+            $out += 'gh pr checks exits 8 while checks are pending; it is not an error. Re-run it later, or use --watch.'
+        }
+        elseif ($isResult -and $exitCode -eq 1 -and $cmd -match '-(ErrorAction|ea)\s*[: ]\s*(SilentlyContinue|0)\b' -and $body -and -not $hasErrorShape) {
+            $out += 'The command used -ErrorAction SilentlyContinue; the suppressed error still sets the exit code, and the output above is valid.'
+        }
+        else {
+            if ($err -match "The term '([^']+)' is not recognized") {
+                $term = $Matches[1]
+                if ($unixMap.ContainsKey($term)) {
+                    $out += "'$term' is a Unix command; this shell is PowerShell on Windows. Use $($unixMap[$term])."
+                } else {
+                    $out += "'$term' is not on PATH for the agent's shell (a fresh pwsh -NoProfile per command; your interactive profile does not apply). Check with Get-Command $term, or call the executable by full path."
+                }
             }
-        }
-        if ($err -match 'not a valid statement separator|The token .&&.|The token .\|\|.') {
-            $out += "The agent's shell is Windows PowerShell 5.1, where && and || are parse errors. Chain with ; instead. Installing PowerShell 7 (winget install Microsoft.PowerShell) and restarting the CLI removes this class of error."
-        }
-        if ($err -match 'missing the terminator|Missing closing|Unexpected token|Unrecognized token|Missing expression|Missing argument|reserved for future use|Unexpected character|ParserError') {
-            $out += 'This is a PowerShell parse error, almost always quoting.'
-            $out += $Quoting
-        }
-        if ($err -match '/dev/null|Cannot find path .*/') {
-            $out += 'Forward-slash arguments such as /dev/null or /s are treated as paths. Use 2>$null, and PowerShell cmdlet parameters (-Recurse, -Force) instead of cmd.exe switches.'
-        }
-        if ($err -match 'running scripts is disabled|UnauthorizedAccess.*\.ps1') {
-            $out += 'Execution policy blocked the script. Run it as: pwsh -NoProfile -ExecutionPolicy Bypass -File .\script.ps1'
-        }
-        if ($err -match 'being used by another process') {
-            $out += 'The file is locked by another process (often an editor or a build). Do not retry with a different write method; wait or ask the user.'
-        }
-        if ($out.Count -eq 0 -and $err -match 'unterminated|quote|unexpected.*string|syntax error') {
-            $out += $Quoting
+            if ($err -match 'not a valid statement separator|The token .&&.|The token .\|\|.') {
+                $out += "The agent's shell is Windows PowerShell 5.1, where && and || are parse errors. Chain with ; instead. Installing PowerShell 7 (winget install Microsoft.PowerShell) and restarting the CLI removes this class of error."
+            }
+            $jsonHit = ($err -match $JsonFailurePattern)
+            if ($jsonHit) {
+                if ($cmd -match '2>&1') {
+                    $out += 'The JSON parser received stderr text because of 2>&1. Use 2>$null (or 2>$errFile) before the pipe and check $LASTEXITCODE before parsing.'
+                } else {
+                    $out += 'The input was not valid JSON. Check $LASTEXITCODE and the first line of the output before parsing; a tool that failed usually printed a message instead of JSON.'
+                }
+            }
+            # Parse errors after execution: only with a non-zero exit and PowerShell's own error layout, so the
+            # words "ParserError" or "Unexpected token" inside a search result at exit 0 stay silent.
+            if (-not $jsonHit -and $failed -and ((-not $isResult) -or $hasErrorShape) -and $err -match 'missing the terminator|Missing closing|Unexpected token|Unrecognized token|Missing expression|Missing argument|reserved for future use|ParserError') {
+                $out += 'This is a PowerShell parse error, almost always quoting.'
+                $out += $Quoting
+            }
+            if ($err -match $CdFailurePattern) {
+                $out += 'A cd/Set-Location failed but the later statements still ran in the previous folder; re-check their results. Create or correct the folder, or use Set-Location X -ErrorAction Stop so a failed cd stops the line.'
+            }
+            if ($err -match '/dev/null|Cannot find path .*/') {
+                $out += 'Forward-slash arguments such as /dev/null or /s are treated as paths. Use 2>$null, and PowerShell cmdlet parameters (-Recurse, -Force) instead of cmd.exe switches.'
+            }
+            if ($err -match 'running scripts is disabled|UnauthorizedAccess.*\.ps1') {
+                $out += 'Execution policy blocked the script. Run it as: pwsh -NoProfile -ExecutionPolicy Bypass -File .\script.ps1'
+            }
+            if ($err -match 'being used by another process') {
+                $out += 'The file is locked by another process (often an editor or a build). Do not retry with a different write method; wait or ask the user.'
+            }
+            if ($err -match "UnicodeEncodeError|'charmap' codec can't encode|cp1252") {
+                $out += "Python failed to print a non-ASCII character because the console code page is cp1252. Set `$env:PYTHONUTF8 = '1' before the command (or permanently with: setx PYTHONUTF8 1) and rerun."
+            }
+            if ($err -match "ModuleNotFoundError: No module named '([^']+)'") {
+                $pkg = $Matches[1]
+                $out += "Missing Python package '$pkg'. Run it with uv instead of installing into the system interpreter: uv run --no-project --with $pkg python <script.py>"
+            }
+            if ($err -match 'Failed to spawn:?\s*\\?([A-Za-z0-9_.-]+)') {
+                $exe = $Matches[1]
+                $out += "'$exe' is not installed for this interpreter. Run it through uv: uv run --with $exe $exe"
+            }
+            if ($err -match 'Needed a single revision' -and $cmd -match 'rev-parse') {
+                $out += 'git rev-parse --short and --verify take one ref at a time; run it once per ref.'
+            }
+            if ($err -match 'os error 123|volume label syntax is incorrect' -and $cmd -match '\*') {
+                $out += 'Native executables do not expand wildcards on Windows. Expand the pattern with Get-ChildItem first and pass the file names: Get-ChildItem <pattern> | ForEach-Object { <tool> $_.FullName }'
+            }
+            if ($out.Count -eq 0 -and $failed -and $err -match 'unterminated|quote|unexpected.*string|syntax error') {
+                $out += $Quoting
+            }
         }
     }
     elseif ($tool -in @('edit', 'str_replace_editor', 'apply_patch', 'create')) {
-        if ($err -match 'No match|not found|did not match|could not find|does not exist in|Could not apply|failed to apply|does not appear|not unique|multiple|more than one|ambiguous|modified since|changed since') {
+        # The CLI passes short error strings here ("No match found", "Parent directory does not exist").
+        if ($err -match 'parent directory .*does not exist|directory does not exist') {
+            $dir = ''
+            if ($null -ne $ta -and $ta.PSObject -and $ta.PSObject.Properties['path'] -and $ta.path) {
+                try { $dir = Split-Path -Parent ([string]$ta.path) } catch { }
+            }
+            $target = '<directory>'
+            if ($dir) { $target = "'" + $dir + "'" }
+            $out += "The target directory does not exist. Create it first with one shell call: New-Item -ItemType Directory -Force $target ; then call the create tool again with the same content. Do not run the two calls in parallel, and do not write the file from the shell instead."
+        }
+        elseif ($err -match 'already exists') {
+            $out += 'The file already exists. View it with the view tool, then make the change with the edit tool. Never delete and re-create it with the create tool: that rewrites every line ending and loses unrelated content.'
+        }
+        elseif ($err -match 'No match|not found|did not match|could not find|does not exist in|Could not apply|failed to apply|does not appear|not unique|multiple|more than one|ambiguous|modified since|changed since') {
             $out += $EditRecovery
         }
     }
 
     if ($out.Count -gt 0) {
+        # Both events answer with {"additionalContext": "..."} and exit 0; see the header comment.
         $text = ($out -join "`n`n")
-        if ($mode -eq 'result') {
-            @{ additionalContext = $text } | ConvertTo-Json -Compress
-            exit 0
-        }
-        [Console]::Out.Write($text)
-        exit 2
+        @{ additionalContext = $text } | ConvertTo-Json -Compress
+        exit 0
     }
 } catch {
     Write-GuardLog "ERROR recovery-coach: $($_.Exception.Message)"
