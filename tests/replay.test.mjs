@@ -23,8 +23,10 @@ const corpus = process.env.WINDOWS_GUARD_CORPUS_DIR ? path.resolve(process.env.W
 const baselineFile = path.join(corpus, "baseline.json");
 const isWin = process.platform === "win32";
 // Both engines replay with the same working directory, so decisions that mention it compare equal.
-const work = path.join(os.tmpdir(), "wg-replay-cwd");
-fs.mkdirSync(work, { recursive: true });
+// realpath turns an 8.3 short temp path (RUNNER~1 on CI runners) into the long form PowerShell uses.
+const workRaw = path.join(os.tmpdir(), "wg-replay-cwd");
+fs.mkdirSync(workRaw, { recursive: true });
+const work = fs.realpathSync.native(workRaw);
 
 // Same minimal PATH as the unit tests: pwsh reachable for the parser, no Git-for-Windows head/grep.
 const pwsh = g.findExecutable("pwsh") ?? g.findExecutable("powershell");

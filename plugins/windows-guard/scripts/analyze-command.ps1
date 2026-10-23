@@ -277,8 +277,9 @@ function Get-ShellGuardDecision([string]$Command, [string]$Cwd = '') {
                     $exists = $true
                     try { $exists = Test-Path -LiteralPath $full -PathType Container } catch { $exists = $true }
                     if (-not $exists) {
-                        $where = $Cwd; if (-not $where) { $where = 'the current folder' }
-                        return (New-GuardDeny 'missing-cd-target' "The first statement changes directory to '$target', which does not exist under $where, so the cd fails and the rest of the line runs in the old folder with exit code 0. Create or correct the folder first, or use Set-Location '$target' -ErrorAction Stop so a failed cd stops the line. Add  # wg:allow  if this is intentional." $false)
+                        # The reason names the target only: a cwd in the text would make the two engines' output
+                        # differ wherever their temp paths differ in form (8.3 short names on CI runners).
+                        return (New-GuardDeny 'missing-cd-target' "The first statement changes directory to '$target', which does not exist, so the cd fails and the rest of the line runs in the old folder with exit code 0. Create or correct the folder first, or use Set-Location '$target' -ErrorAction Stop so a failed cd stops the line. Add  # wg:allow  if this is intentional." $false)
                     }
                 }
             }
