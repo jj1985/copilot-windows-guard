@@ -3,7 +3,8 @@
 // Records every decision in tests/.work/replay-node.json (read by replay-parity.mjs), scores the
 // decisions against the labels, and fails on any labeled row that is not a known gap or when
 // precision or recall drop below tests/corpus/baseline.json. WINDOWS_GUARD_UPDATE_BASELINE=1
-// rewrites the baseline from the current numbers instead of checking it.
+// rewrites the baseline from the current numbers instead of checking it. WINDOWS_GUARD_CORPUS_DIR
+// points both the rows and the baseline at a corpus kept outside the repository.
 
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -18,7 +19,8 @@ import { compareToBaseline, scoreCommands, scoreFailures, summarize, toBaseline 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const workDir = path.join(here, ".work");
 const outFile = path.join(workDir, "replay-node.json");
-const baselineFile = path.join(corpusDir, "baseline.json");
+const corpus = process.env.WINDOWS_GUARD_CORPUS_DIR ? path.resolve(process.env.WINDOWS_GUARD_CORPUS_DIR) : corpusDir;
+const baselineFile = path.join(corpus, "baseline.json");
 const isWin = process.platform === "win32";
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "wg-replay-"));
 
@@ -40,7 +42,8 @@ const minPath = [
 const env = { ...process.env, PATH: minPath, Path: minPath };
 const log = () => {};
 
-const { commands, failures } = loadCorpus();
+const { commands, failures } = loadCorpus(corpus);
+console.log(`corpus: ${corpus}`);
 const decisions = {};
 const outcomes = {};
 let baseline = null;
@@ -58,7 +61,7 @@ after(() => {
   }
 });
 
-describe("replay: shell-guard over tests/corpus/commands.jsonl", () => {
+describe("replay: shell-guard over the corpus commands", () => {
   it("records a decision for every row", async () => {
     // One pwsh process parses the whole corpus; shellGuard then hits the parser cache.
     await g.parsePowerShellBatch(
@@ -78,7 +81,7 @@ describe("replay: shell-guard over tests/corpus/commands.jsonl", () => {
   });
 });
 
-describe("replay: recovery-coach over tests/corpus/failures.jsonl", () => {
+describe("replay: recovery-coach over the corpus failures", () => {
   it("records an outcome for every row", () => {
     for (const r of failures) {
       const advice =
@@ -102,7 +105,7 @@ describe("replay: decisions file and baseline", () => {
     fs.writeFileSync(outFile, `${JSON.stringify({ engine: "node", commands: decisions, failures: outcomes }, null, 2)}\n`);
     assert.ok(fs.existsSync(outFile));
   });
-  it("precision and recall are not below tests/corpus/baseline.json", () => {
+  it("precision and recall are not below the corpus baseline.json", () => {
     const mc = scoreCommands(commands, decisions);
     const mf = scoreFailures(failures, outcomes);
     const current = { updated: new Date().toISOString().slice(0, 10), commands: toBaseline(mc), failures: toBaseline(mf) };
@@ -111,7 +114,7 @@ describe("replay: decisions file and baseline", () => {
       console.log(`baseline written: ${baselineFile}`);
       return;
     }
-    assert.ok(baseline, "tests/corpus/baseline.json is missing; run once with WINDOWS_GUARD_UPDATE_BASELINE=1");
+    assert.ok(baseline, `${baselineFile} is missing; run once with WINDOWS_GUARD_UPDATE_BASELINE=1`);
     const regressions = [
       ...compareToBaseline("commands", mc, baseline.commands),
       ...compareToBaseline("failures", mf, baseline.failures),

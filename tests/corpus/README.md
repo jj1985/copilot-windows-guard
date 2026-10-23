@@ -47,6 +47,20 @@ Positive class: `deny` for commands, `advice` for failures. Precision = TP / (TP
 $env:WINDOWS_GUARD_UPDATE_BASELINE = '1'; node --test tests/replay.test.mjs; Remove-Item Env:WINDOWS_GUARD_UPDATE_BASELINE
 ```
 
+## A private corpus outside the repository
+
+Session histories often cannot leave the machine they were recorded on. Keep such a corpus in any folder with the same three files (`commands.jsonl`, `failures.jsonl`, `baseline.json`) and point the runners at it; only the metrics need to travel:
+
+```powershell
+$env:WINDOWS_GUARD_CORPUS_DIR = 'D:\private\wg-corpus'
+$env:WINDOWS_GUARD_UPDATE_BASELINE = '1'; node --test tests/replay.test.mjs; Remove-Item Env:WINDOWS_GUARD_UPDATE_BASELINE   # first run: write that corpus's baseline
+node --test tests/replay.test.mjs
+pwsh -NoProfile -File tests/Invoke-ReplayTests.ps1 -CorpusDir 'D:\private\wg-corpus'
+node tests/replay-parity.mjs
+```
+
+The baseline for a private corpus lives next to it, never in the repository. Row ids may overlap with the public corpus; the runners only ever load one corpus at a time.
+
 ## Adding rows from a session history
 
 `import-replay.mjs` turns a JSON array or JSON Lines export of historical commands into unlabeled corpus rows:

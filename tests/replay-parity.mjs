@@ -3,11 +3,12 @@
 //   pwsh -NoProfile -File tests/Invoke-ReplayTests.ps1    -> tests/.work/replay-ps.json
 //   node tests/replay-parity.mjs
 // Exit 0 when every row has the same decision and, for denials and advice, the same text.
+// WINDOWS_GUARD_CORPUS_DIR selects a corpus outside the repository, as for the runners.
 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadCorpus } from "./corpus/load.mjs";
+import { corpusDir, loadCorpus } from "./corpus/load.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -23,7 +24,8 @@ function read(name) {
 const norm = (s) => String(s ?? "").replace(/\r\n/g, "\n").trim();
 const node = read("replay-node.json");
 const ps = read("replay-ps.json");
-const { commands, failures } = loadCorpus();
+const corpus = process.env.WINDOWS_GUARD_CORPUS_DIR ? path.resolve(process.env.WINDOWS_GUARD_CORPUS_DIR) : corpusDir;
+const { commands, failures } = loadCorpus(corpus);
 const mismatches = [];
 
 for (const r of commands) {
