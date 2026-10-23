@@ -2,6 +2,22 @@
 
 A GitHub Copilot CLI plugin that stops the agent from corrupting files on Windows and coaches it through PowerShell quoting and edit failures.
 
+**Experimental branch preview.** Install this branch's plugin, not the default-branch version:
+
+```powershell
+copilot plugin marketplace add jj1985/copilot-windows-guard#experimental
+copilot plugin install windows-guard@copilot-windows-guard
+```
+
+If a stable copy is already installed, follow the [switching instructions](../../README.md#switching-an-existing-installation) first. PowerShell hooks remain the default. To use the extension engine (verified on CLI 1.0.103):
+
+```powershell
+$env:WINDOWS_GUARD_MODE = 'extension'
+copilot --experimental
+```
+
+Approve the extension and confirm `windows-guard: extension mode active` in the timeline. Prompt mode also needs `GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS=true`. Unset `WINDOWS_GUARD_MODE` and restart the session to restore PowerShell hooks; the switch bypasses the hooks even if the extension fails to load or is disabled.
+
 See the [repository README](../../README.md) for the full description, installation, configuration and the research behind it.
 
 ## Contents
@@ -20,4 +36,4 @@ See the [repository README](../../README.md) for the full description, installat
 | `com.github.copilot/rules/windows-guard.md` | Always-on instructions for Windows and PowerShell |
 | `skills/windows-powershell-quoting/SKILL.md` | On-demand quoting and file-writing reference |
 
-All scripts run under PowerShell 7 and Windows PowerShell 5.1. The extension needs no installation: Copilot CLI runs it with its bundled Node.js runtime when experimental features are on.
+All scripts run under PowerShell 7 and Windows PowerShell 5.1. The extension needs no separate Node.js or SDK installation: Copilot CLI runs this branch's installed extension with its bundled Node.js runtime when experimental features are on.

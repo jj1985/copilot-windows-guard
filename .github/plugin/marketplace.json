@@ -4,7 +4,7 @@
     "name": "jj1985"
   },
   "metadata": {
-    "description": "Windows 11 reliability fixes for GitHub Copilot CLI: line endings, BOMs, encodings, PowerShell quoting.",
+    "description": "Experimental extension-engine preview of Windows 11 reliability fixes for GitHub Copilot CLI: line endings, BOMs, encodings, PowerShell quoting.",
     "version": "0.2.0"
   },
   "plugins": [
@@ -16,8 +16,8 @@
       "author": {
         "name": "jj1985"
       },
-      "homepage": "https://github.com/jj1985/copilot-windows-guard",
-      "repository": "https://github.com/jj1985/copilot-windows-guard",
+      "homepage": "https://github.com/jj1985/copilot-windows-guard/tree/experimental",
+      "repository": "https://github.com/jj1985/copilot-windows-guard/tree/experimental",
       "license": "MIT",
       "category": "productivity",
       "keywords": [
