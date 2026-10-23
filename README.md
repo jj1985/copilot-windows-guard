@@ -62,7 +62,7 @@ It is **off by default**. One switch selects the engine, so nothing ever runs tw
 
 How the launchers know: when the extension joins a session in extension mode it writes `%LOCALAPPDATA%\copilot-windows-guard\active\<sessionId>` containing its process id, and removes the file when the session ends or the process exits. A launcher in extension mode reads the session id from its payload and exits early only if that file exists and the process is alive; otherwise it runs its script. A stale file from a crashed extension cannot disable the hooks, because its process id is dead.
 
-Verified on 2026-10-23 with CLI 1.0.103: with the variable set but experimental features off (so the extension never loads), a created file still came out as 14 LF bytes, and the plugin's own log shows the PowerShell normalizer doing it; with the extension running, the marker file existed for the session, the PowerShell log stayed silent, and the marker was gone after exit.
+Verified on 2026-10-23 with CLI 1.0.103: with the variable set but experimental features off (so the extension never loads), a created file still came out as 14 LF bytes, and the plugin's own log shows the PowerShell normalizer doing it; with the extension running, the marker file existed for the session, the PowerShell log stayed silent, and the marker was gone after exit. The same checks pass against the plugin installed from this branch through the marketplace pin: hooks engine, and extension engine for create, deny and coach.
 
 ### Enable it
 
@@ -76,7 +76,7 @@ copilot --experimental
 `"experimental": true` in `~/.copilot/settings.json` replaces the flag. Then:
 
 - **Approve the extension.** Interactive sessions ask once per extension and directory (per the CLI docs); `--allow-all-tools`, or `--allow-tool` with the `extension-permission-access(...)` pattern, skips the prompt. The prompt-mode runs below used `--allow-all-tools` and were not asked.
-- **Prompt mode needs one more variable.** `copilot -p ...` does not load extensions unless `GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS=true` is set.
+- **Prompt mode works without extra settings.** `copilot -p ...` loaded the installed plugin's extension as is (verified with the marketplace install on 1.0.103). `GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS=true` is the CLI's switch for repository extensions under `.github/extensions/`, which prompt mode otherwise skips; it is harmless here.
 - **No separate Node.js or SDK installation.** Once this branch's plugin is installed, the CLI runs the extension with the Node.js runtime inside `copilot.exe` and resolves `@github/copilot-sdk/extension` itself; the log shows `node v24.22.1 at ...\copilot.exe`.
 - **Confirm it is active.** The session timeline shows `windows-guard: extension mode active`, `/extensions manage` lists `windows-guard` as running, and `windows-guard.log` gains `[ext]` lines, and `%LOCALAPPDATA%\copilot-windows-guard\active\` holds a file named after the session id. Each extension also writes its own log under `~/.copilot/logs/extensions/`.
 
@@ -100,7 +100,7 @@ Trade-offs:
 - **An approval prompt for every user.** A plugin-shipped extension is discovered for everyone who runs with `--experimental`, including in the default mode where it stays idle. `/extensions mode` set to Disabled turns extensions off entirely; the PowerShell hooks take over on their own because no liveness marker is written.
 - **Parser check still spawns PowerShell**, but only after every cheap rule passed, once per distinct command text. `WINDOWS_GUARD_PARSER=off` removes it; unterminated strings and bash `for` / `[ -f x ]` syntax are then caught only after execution, by the coach.
 - **Tool failures.** The SDK documents that extension hooks see only `"failure"` results, not `"rejected"`, `"denied"` or `"timeout"`, and copilot-sdk#1220 tracked failures not reaching extensions at all. Verified on CLI 1.0.103: `onPostToolUseFailure` fires for an edit-tool `No match found` and the model receives the recovery steps. Other failure kinds were not tested.
-- **`-p` automation** needs the extra variable, and the extension's one-line startup message appears in prompt-mode output.
+- **`-p` automation** shows the extension's one-line startup message in the output.
 - **Windows only.** On macOS and Linux the extension joins the session and does nothing, like the hooks.
 
 To return to the PowerShell engine, unset `WINDOWS_GUARD_MODE` (and any persistent setting of it) and start a new session. Disabling experimental features or declining the extension's approval also falls back to the hooks on its own, at the normal hook latency, because no liveness marker exists then.
@@ -231,7 +231,7 @@ The most reliable way to express a repository's line-ending policy is `.gitattri
 
 Evaluated against CLI 1.0.103 (2026-10-22). None of the experimental features fixes the file tools' CRLF/BOM behavior, but three are worth knowing about:
 
-- **Extensions** (`--experimental`): in-process JavaScript that can register tools and session hook callbacks. Since 0.2.0 this plugin ships one, off by default; see [Extension mode](#extension-mode-experimental). Verified on 1.0.103: a plugin-shipped extension loads from `com.github.copilot/extensions/` (also in `-p` mode with `GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS=true`), `additionalContext` from `onSessionStart` and `onPostToolUse` reaches the model ([copilot-cli#2652](https://github.com/github/copilot-cli/issues/2652) closed), and `onPostToolUseFailure` receives edit-tool failures ([copilot-sdk#1220](https://github.com/github/copilot-sdk/issues/1220) is still open for rejected, denied and timed-out results). Built-in tools cannot be overridden, so `edit` and `create` still write CRLF first and the extension, like the hook, corrects the bytes afterwards.
+- **Extensions** (`--experimental`): in-process JavaScript that can register tools and session hook callbacks. Since 0.2.0 this plugin ships one, off by default; see [Extension mode](#extension-mode-experimental). Verified on 1.0.103: a plugin-shipped extension loads from `com.github.copilot/extensions/` (also in `-p` mode, with no extra variable for a plugin-shipped extension), `additionalContext` from `onSessionStart` and `onPostToolUse` reaches the model ([copilot-cli#2652](https://github.com/github/copilot-cli/issues/2652) closed), and `onPostToolUseFailure` receives edit-tool failures ([copilot-sdk#1220](https://github.com/github/copilot-sdk/issues/1220) is still open for rejected, denied and timed-out results). Built-in tools cannot be overridden, so `edit` and `create` still write CRLF first and the extension, like the hook, corrects the bytes afterwards.
 - **`/rewind` file restore**: restores only the files Copilot changed, without git. A useful undo when a whole-file rewrite slips through.
 - **Dynamic retrieval of skills** (`dynamicRetrieval.skills`): embedding-based per-turn retrieval that makes the quoting skill more likely to load when a prompt involves quoting or shell commands.
 
