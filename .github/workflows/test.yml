@@ -33,6 +33,9 @@ jobs:
       - name: Extension unit tests (node --test)
         run: node --test tests/extension.test.mjs
 
+      - name: Replay corpus through the extension logic
+        run: node --test tests/replay.test.mjs
+
       - name: Parse every script under PowerShell 7 and 5.1
         shell: pwsh
         run: |
@@ -55,3 +58,10 @@ jobs:
       - name: Hook tests under Windows PowerShell 5.1
         shell: pwsh
         run: pwsh -NoProfile -File tests/Invoke-HookTests.ps1 -Shell powershell
+
+      - name: Replay corpus through the PowerShell hooks
+        shell: pwsh
+        run: pwsh -NoProfile -File tests/Invoke-ReplayTests.ps1
+
+      - name: Engine parity on the replay corpus
+        run: node tests/replay-parity.mjs

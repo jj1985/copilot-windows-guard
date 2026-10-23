@@ -247,10 +247,15 @@ pwsh -NoProfile -File tests/Invoke-HookTests.ps1                      # hooks un
 pwsh -NoProfile -File tests/Invoke-HookTests.ps1 -Shell powershell    # hooks under Windows PowerShell 5.1
 copilot --plugin-dir .\plugins\windows-guard                          # try it live without installing
 node --test tests/extension.test.mjs                                  # extension logic, plain Node.js
+node --test tests/replay.test.mjs                                     # replay corpus through the extension logic
+pwsh -NoProfile -File tests/Invoke-ReplayTests.ps1                    # replay corpus through the PowerShell hooks
+node tests/replay-parity.mjs                                          # both engines must agree row by row
 $env:WINDOWS_GUARD_MODE = 'extension'; copilot --experimental --plugin-dir .\plugins\windows-guard   # extension mode live
 ```
 
 The tests feed synthetic Copilot CLI hook payloads to each script and check bytes on disk, deny decisions, exit codes and the inline launcher in `hooks.json`. `tests/extension.test.mjs` runs the same cases against the extension's `guard.mjs` and its session-hook wiring with `node --test` and no dependencies. CI runs all of it on `windows-latest`.
+
+`tests/corpus/` is the replay corpus: real commands and tool failures labeled with the intended decision, scored for precision and recall against `tests/corpus/baseline.json`, with `known-gap` rows for the cases the plugin still gets wrong. Both engines replay it and a parity check requires identical decisions. See [tests/corpus/README.md](tests/corpus/README.md) for the row format and how to import a session history.
 
 The hook payload shape is not documented, so it was verified against a live Copilot CLI 1.0.101 session: `toolArgs` arrives as an object; `create` carries `path` (absolute) and `file_text`; the shell tool carries `command`. The scripts still try `file_path`, `filePath`, `filename`, `fileName`, `file`, `target_file`, and parse `apply_patch` text, in case this changes. If the log shows `NO PATH KEY` lines, open an issue with the logged `toolArgs` shape.
 

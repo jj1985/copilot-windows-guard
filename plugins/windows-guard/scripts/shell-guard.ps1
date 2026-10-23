@@ -25,17 +25,9 @@ try {
     if (-not $cmd) { exit 0 }
     $bypass = ($cmd -match '#\s*wg:allow')
 
-    # 1. Let PowerShell's own parser judge the command. Unterminated strings, bash-only syntax
-    #    (heredocs, `for f in`, `[ -f x ]`), stray \" escapes and mismatched braces all surface
-    #    here with the exact error, before the agent spends a round trip discovering it.
-    $tokens = $null; $errors = $null
-    [void][System.Management.Automation.Language.Parser]::ParseInput($cmd, [ref]$tokens, [ref]$errors)
-    if ($errors -and $errors.Count -gt 0) {
-        $msgs = @($errors | Select-Object -First 3 | ForEach-Object { $_.Message.Trim() }) -join ' | '
-        Deny "PowerShell cannot parse this command: $msgs. $CheatSheet"
-    }
-
-    # 2. Idioms that parse but fail or corrupt files. Most specific first.
+    # 1. Idioms that fail or corrupt files, most specific first. Cheap rules run before the parser so
+    #    that both engines deny with the same, more specific reason (the extension runs the parser
+    #    last because it costs a process there).
     $rules = @(
         @{ re = '<<-?\s*[''"]?[A-Za-z_]\w*'; bypass = $false
            why = 'Bash heredocs do not exist in PowerShell. Put file content through the edit/create tool, or create a .ps1 with the create tool and run: pwsh -NoProfile -ExecutionPolicy Bypass -File .\script.ps1' }
@@ -63,7 +55,7 @@ try {
         }
     }
 
-    # 3. Unix commands in command position, unless the executable is actually installed.
+    # 2. Unix commands in command position, unless the executable is actually installed.
     $unixMap = @{
         sed = 'the edit tool (for in-place edits) or -replace'; awk = 'ForEach-Object / -split'; grep = 'Select-String'
         head = 'Select-Object -First N'; tail = 'Get-Content -Tail N'; touch = 'New-Item -ItemType File'
@@ -82,9 +74,19 @@ try {
         Deny "'$name' is a Unix command and is not installed in this PowerShell session. Use $($unixMap[$name]). For in-place file edits use the edit tool, not sed. Add  # wg:allow  if you have confirmed the tool exists."
     }
 
-    # 4. Bash-style escaped quotes outside single-quoted literals.
+    # 3. Bash-style escaped quotes outside single-quoted literals.
     if ($cmd -match '\\"' -and $cmd -notmatch "'" -and -not $bypass) {
         Deny ('\" is not an escape sequence in PowerShell. ' + $CheatSheet + ' For JSON or other quote-heavy arguments to native tools, write the payload to a file with the create tool and pass the file name (for example --body-file or --input).')
+    }
+
+    # 4. Let PowerShell's own parser judge whatever passed the rules above. Unterminated strings,
+    #    bash-only syntax (`for f in`, `[ -f x ]`), stray \" escapes and mismatched braces all surface
+    #    here with the exact error, before the agent spends a round trip discovering it.
+    $tokens = $null; $errors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseInput($cmd, [ref]$tokens, [ref]$errors)
+    if ($errors -and $errors.Count -gt 0) {
+        $msgs = @($errors | Select-Object -First 3 | ForEach-Object { $_.Message.Trim() }) -join ' | '
+        Deny "PowerShell cannot parse this command: $msgs. $CheatSheet"
     }
 } catch {
     Write-GuardLog "ERROR shell-guard: $($_.Exception.Message)"

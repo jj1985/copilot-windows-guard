@@ -1,0 +1,59 @@
+# Replay corpus for shell-guard (one JSON object per line; see README.md). Lines starting with # are ignored.
+# source "unit": the cases from the unit suites. source "review-2026-10-23": examples from the validation against 199 incidents.
+{"id":"c001","command":"cat <<EOF > x.txt\nhello\nEOF","expect":"deny","rule":"heredoc","source":"unit"}
+{"id":"c002","command":"head -5 file.txt","expect":"deny","hint":"Select-Object","rule":"unix-command","source":"unit"}
+{"id":"c003","command":"dotnet build 2>&1 | grep error | head -20","expect":"deny","hint":"Select-String","rule":"unix-command","source":"unit"}
+{"id":"c004","command":"ls 2>/dev/null","expect":"deny","hint":"2>$null","rule":"dev-null","source":"unit"}
+{"id":"c005","command":"echo \"hello\" > out.txt","expect":"deny","hint":"edit/create tool","rule":"redirect","succeeded":true,"source":"unit","note":"intended policy: the redirect works but writes CRLF"}
+{"id":"c006","command":"echo \"hello\" > out.txt # wg:allow","expect":"allow","rule":"bypass","source":"unit"}
+{"id":"c007","command":"\"text\" | Set-Content out.txt","expect":"deny","hint":"utf8NoBOM","rule":"shell-write","succeeded":true,"source":"unit","note":"intended policy"}
+{"id":"c008","command":"Get-Content x.txt | Out-File -Encoding utf8NoBOM -FilePath y.txt","expect":"allow","source":"unit"}
+{"id":"c009","command":"$home = 'C:\\x'; Remove-Item -Recurse -Force $home","expect":"deny","hint":"HOME","rule":"home-assignment","source":"unit"}
+{"id":"c010","command":"echo \"unterminated","expect":"deny","hint":"cannot parse","rule":"parser","source":"unit"}
+{"id":"c011","command":"echo \"{\\\"a\\\":1}\"","expect":"deny","rule":"bash-escaped-quote","source":"unit"}
+{"id":"c012","command":"FOO=bar npm run build","expect":"deny","hint":"$env:","rule":"env-assignment","source":"unit"}
+{"id":"c013","command":"export FOO=bar","expect":"deny","hint":"$env:","rule":"unix-command","source":"unit"}
+{"id":"c014","command":"dir /s *.cs","expect":"deny","hint":"Get-ChildItem","rule":"cmd-switch","source":"unit"}
+{"id":"c015","command":"python -c \"open('x','w').write('hi')\"","expect":"deny","hint":"create tool","rule":"inline-write","source":"unit"}
+{"id":"c016","command":"find . -name \"*.cs\"","expect":"deny","hint":"Get-ChildItem","rule":"unix-command","source":"unit"}
+{"id":"c017","command":"for f in *.txt; do echo $f; done","expect":"deny","hint":"cannot parse","rule":"parser","source":"unit"}
+{"id":"c018","command":"echo -e \"a\\nb\"","expect":"deny","hint":"Write-Output","rule":"echo-flags","source":"unit"}
+{"id":"c019","command":"Get-Content x.txt | Select-Object -First 5","expect":"allow","source":"unit"}
+{"id":"c020","command":"dotnet build 2>$null","expect":"allow","source":"unit"}
+{"id":"c021","command":"dotnet build 2>&1 | Select-String error","expect":"allow","source":"unit"}
+{"id":"c022","command":"npm run build -- --flag","expect":"allow","source":"unit"}
+{"id":"c023","command":"git commit -m 'it''s done'","expect":"allow","source":"unit"}
+{"id":"c024","command":"gh pr create --body-file body.md","expect":"allow","source":"unit"}
+{"id":"c025","command":"if ($x -gt 5) { 'big' }","expect":"allow","source":"unit"}
+{"id":"c026","command":"Get-ChildItem -Recurse | Where-Object { $_.Length -gt 1000 }","expect":"allow","source":"unit"}
+{"id":"c027","command":"curl.exe -s https://example.com","expect":"allow","source":"unit"}
+{"id":"c028","command":"for ($i = 0; $i -lt 3; $i++) { $i }","expect":"allow","source":"unit"}
+{"id":"c029","command":"$x = 5; Write-Output \"x is $x\"","expect":"allow","source":"unit"}
+{"id":"c030","command":"node -e \"console.log(1)\"","expect":"allow","source":"unit"}
+{"id":"c031","command":"npm run build -- '{\\\"a\\\":1}'","expect":"allow","source":"unit"}
+{"id":"c032","command":"[IO.File]::WriteAllText('x.txt', 'hi', [Text.UTF8Encoding]::new($false))","expect":"allow","source":"unit"}
+{"id":"c033","command":"Get-Content x | Select-String -Pattern \"a>b\"","expect":"allow","status":"known-gap","rule":"redirect-in-string","succeeded":true,"source":"unit","note":"the unit test documents the current deny; the desired decision is allow"}
+{"id":"c034","command":"Get-Content x | Select-String -Pattern \"a>b\" # wg:allow","expect":"allow","rule":"bypass","source":"unit"}
+{"id":"c035","command":"frobnicate --version","expect":"allow","source":"unit"}
+{"id":"c036","command":"Write-Output 'it''s a \"quoted\" test'","expect":"allow","source":"unit"}
+# --- review: rule misfires (commands that succeeded in history and should be allowed)
+{"id":"c040","command":"Select-String -Path log.txt -Pattern '<[^>]+>'","expect":"allow","status":"known-gap","rule":"redirect-in-string","succeeded":true,"source":"review-2026-10-23","note":"> inside a quoted regex"}
+{"id":"c041","command":"$s -replace '(\\w+)@', '$1<REDACTED>@'","expect":"allow","status":"known-gap","rule":"redirect-in-string","succeeded":true,"source":"review-2026-10-23"}
+{"id":"c042","command":"Write-Output \"key => value\"","expect":"allow","status":"known-gap","rule":"redirect-in-string","succeeded":true,"source":"review-2026-10-23","note":"arrow inside a string"}
+{"id":"c043","command":"Get-Content page.html | Select-String '<div class=\"x\">'","expect":"allow","status":"known-gap","rule":"redirect-in-string","succeeded":true,"source":"review-2026-10-23","note":"HTML inside a string"}
+{"id":"c044","command":"@'\nif i >= 0:\n    print(i)\n'@ | python -","expect":"allow","status":"known-gap","rule":"redirect-in-here-string","succeeded":true,"source":"review-2026-10-23","note":"Python comparison inside a here-string piped to stdin"}
+{"id":"c045","command":"python -c \"import json; print(json.load(open('cfg.json'))['name'])\"","expect":"allow","status":"known-gap","rule":"inline-write","succeeded":true,"source":"review-2026-10-23","note":"read-only open()"}
+{"id":"c046","command":"python -c \"import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['name'])\"","expect":"allow","status":"known-gap","rule":"inline-write","succeeded":true,"source":"review-2026-10-23","note":"read-only open()"}
+{"id":"c047","command":"gh pr comment 12 --body \"Rebased onto main (head ecba1d7)\"","expect":"allow","status":"known-gap","rule":"unix-command","succeeded":true,"source":"review-2026-10-23","note":"the word head inside a quoted argument"}
+{"id":"c048","command":"wsl bash -lc 'ls -la | head -3'","expect":"allow","status":"known-gap","rule":"unix-command","succeeded":true,"source":"review-2026-10-23","note":"Unix pipeline inside a wsl argument"}
+{"id":"c049","command":"Select-String -Path a.txt -Pattern '<<<<<<< HEAD'","expect":"allow","status":"known-gap","rule":"heredoc","succeeded":true,"source":"review-2026-10-23","note":"conflict marker inside a string"}
+{"id":"c050","command":"@'\nmask = 1 << n\nprint(mask)\n'@ | python -","expect":"allow","status":"known-gap","rule":"heredoc","succeeded":true,"source":"review-2026-10-23","note":"shift operator inside a here-string"}
+# --- review: intended policy (the command worked, the denial is deliberate)
+{"id":"c051","command":"Get-Date > now.txt","expect":"deny","hint":"edit/create tool","rule":"redirect","succeeded":true,"source":"review-2026-10-23","note":"intended policy"}
+{"id":"c052","command":"\"print('hi')\" | Set-Content _tmp.py; python _tmp.py","expect":"deny","hint":"utf8NoBOM","rule":"shell-write","succeeded":true,"source":"review-2026-10-23","note":"intended policy: throwaway script written from the shell"}
+# --- review: silent failures that should be denied (no rule exists yet)
+{"id":"c060","command":"cd wg-test; [IO.File]::Exists('eol_probe.txt')","expect":"deny","status":"known-gap","rule":"dotnet-relative-path","succeeded":false,"source":"review-2026-10-23","note":".NET resolves against the CLI start folder, not the cd target"}
+{"id":"c061","command":"cd C:\\nonexistent; Get-Location","expect":"deny","status":"known-gap","rule":"missing-cd-target","succeeded":false,"source":"review-2026-10-23","note":"exit 0 in the old folder"}
+{"id":"c062","command":"gh api repos/o/r 2>&1 | ConvertFrom-Json","expect":"deny","status":"known-gap","rule":"stderr-into-parser","succeeded":false,"source":"review-2026-10-23"}
+{"id":"c063","command":"python -c \"d = {'a': 1}; print(\\\"ok\\\")\"","expect":"deny","status":"known-gap","rule":"bash-escaped-quote","succeeded":false,"source":"review-2026-10-23","note":"a single quote elsewhere disables the backslash-quote rule; Python gets a SyntaxError"}
+{"id":"c064","command":"python -c \"import os\nfor f in os.listdir('.'):\n    print(f)\"","expect":"deny","status":"known-gap","rule":"multiline-inline-script","succeeded":false,"source":"review-2026-10-23","note":"multi-line python -c; the review found 45 of these"}

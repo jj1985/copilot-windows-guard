@@ -461,10 +461,54 @@ export async function parsePowerShell(cmd, { env = process.env, log = writeGuard
     }
   }
   if (result) {
-    if (parseCache.size >= 256) parseCache.clear();
+    if (parseCache.size >= 4096) parseCache.clear();
     parseCache.set(cmd, result);
   }
   return result;
+}
+
+const PARSE_BATCH_SCRIPT =
+  "$d = $env:WG_PARSE_DIR; $o = @{}; Get-ChildItem -LiteralPath $d -Filter *.ps1 | ForEach-Object { $t = $null; $e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$t, [ref]$e); $m = @(); if ($e) { $m = @($e | Select-Object -First 3 | ForEach-Object { $_.Message.Trim() }) }; $o[$_.BaseName] = $m }; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); $o | ConvertTo-Json -Compress -Depth 3";
+
+// Parses many commands in ONE PowerShell process and fills the parser cache, so a replay of a
+// large corpus does not pay one pwsh start per command. Returns the number of commands parsed.
+// Not used on the hook path, where commands arrive one at a time.
+export async function parsePowerShellBatch(commands, { env = process.env, log = writeGuardLog } = {}) {
+  const todo = [...new Set(commands.filter((c) => typeof c === "string" && c && !parseCache.has(c)))];
+  if (todo.length === 0) return 0;
+  const host = findExecutable("pwsh", env) ?? findExecutable("powershell", env);
+  if (!host) return 0;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wg-parse-batch-"));
+  try {
+    todo.forEach((c, i) => fs.writeFileSync(path.join(dir, `${i}.ps1`), `\uFEFF${c}`, "utf8"));
+    const r = await run(host, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", PARSE_BATCH_SCRIPT], {
+      env: { ...env, WG_PARSE_DIR: dir },
+      timeout: 600000,
+    });
+    if (r.code !== 0) {
+      log(`WARN batch parser host exited ${r.code}: ${r.text.slice(0, 200)}`, env);
+      return 0;
+    }
+    const map = JSON.parse(r.text);
+    let n = 0;
+    todo.forEach((c, i) => {
+      const errors = map[String(i)];
+      if (Array.isArray(errors)) {
+        parseCache.set(c, errors.map((m) => String(m)));
+        n++;
+      }
+    });
+    return n;
+  } catch (e) {
+    log(`ERROR batch parser: ${e?.message ?? e}`, env);
+    return 0;
+  } finally {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // best effort
+    }
+  }
 }
 
 // ------------------------------------------------------------------ utf8-gate
