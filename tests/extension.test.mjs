@@ -400,6 +400,28 @@ describe("coach (postToolUse shell result)", () => {
   });
   it("JSONDecodeError without 2>&1 -> check the exit code and the first line", () =>
     coach("powershell", { command: "python parse.py" }, "json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)\n<shellId: 0 completed with exit code 1>", true, "first line"));
+  // Phase 4: exit-code and error-shape gating, benign exits, new branches.
+  it("ParserError words in search output at exit 0 -> silent", () =>
+    coach("powershell", { command: "Select-String -Path src\\a.js -Pattern Unexpected" }, "src\\a.js:12:  // Unexpected token in parser\n<shellId: 0 completed with exit code 0>", false));
+  it("parse error in the 5.1 error layout at exit 1 -> quoting", () =>
+    coach("powershell", { command: 'echo "a' }, 'At line:1 char:6\n+ echo "a\n+      ~~\nThe string is missing the terminator: ".\n<shellId: 0 completed with exit code 1>', true, "quoting"));
+  it("git grep exit 1 with no output -> no match, not an error", () => coach("powershell", { command: 'git grep -n "TODO"' }, "<shellId: 0 completed with exit code 1>", true, "no match"));
+  it("gh pr checks exit 8 -> pending", () => coach("powershell", { command: "gh pr checks 12" }, "build  pending  0  https://example.com/checks/1\n<shellId: 0 completed with exit code 8>", true, "pending"));
+  it("-ErrorAction SilentlyContinue at exit 1 with output -> the output is valid", () =>
+    coach("powershell", { command: "Get-Item a.txt, missing.txt -ErrorAction SilentlyContinue" }, "a.txt\n<shellId: 0 completed with exit code 1>", true, "output above is valid"));
+  it("UnicodeEncodeError charmap -> PYTHONUTF8", () =>
+    coach("powershell", { command: "python report.py" }, "UnicodeEncodeError: 'charmap' codec can't encode character '\\u2713' in position 0: character maps to <undefined>\n<shellId: 0 completed with exit code 1>", true, "PYTHONUTF8"));
+  it("ModuleNotFoundError -> uv run --with", () =>
+    coach("powershell", { command: "python tool.py" }, "ModuleNotFoundError: No module named 'requests'\n<shellId: 0 completed with exit code 1>", true, "uv run --no-project --with requests"));
+  it("Failed to spawn pytest -> uv run --with pytest", () => coach("powershell", { command: "pytest" }, "Failed to spawn: \\pytest\n<shellId: 0 completed with exit code 1>", true, "uv run --with pytest pytest"));
+  it("rev-parse needed a single revision -> one ref per call", () =>
+    coach("powershell", { command: "git rev-parse --short a1b2c3 d4e5f6" }, "fatal: Needed a single revision\n<shellId: 0 completed with exit code 128>", true, "one ref"));
+  it("os error 123 with a wildcard -> Get-ChildItem first", () =>
+    coach("powershell", { command: "rg -n TODO src\\*.py" }, "rg: src\\*.py: The filename, directory name, or volume label syntax is incorrect. (os error 123)\n<shellId: 0 completed with exit code 2>", true, "Get-ChildItem"));
+  it("a structured exit code 0 silences parse-error words when the marker is absent", () => {
+    const out = g.coachResult("powershell", { command: "rg TODO src" }, "src/a.py:1: // ParserError in a comment", { ...opts, exitCode: 0 });
+    assert.equal(out, null);
+  });
 });
 
 // ---------------------------------------------------------------- inject-rules
@@ -509,6 +531,25 @@ describe("buildHooks (what extension.mjs registers)", () => {
     const out = await hooks.onPostToolUseFailure({ sessionId: "s", timestamp: new Date(), workingDirectory: d, toolName: "create", toolArgs: { path: f, file_text: "x" }, error: "Parent directory does not exist" });
     assert.match(out.additionalContext, /New-Item -ItemType Directory -Force/);
     assert.ok(out.additionalContext.includes(path.dirname(f)));
+  });
+  it("onPostToolUse reads the structured exit code of a shell result", async () => {
+    const out = await hooks.onPostToolUse({
+      sessionId: "s",
+      timestamp: new Date(),
+      workingDirectory: d,
+      toolName: "powershell",
+      toolArgs: { command: "rg TODO src" },
+      toolResult: { resultType: "success", textResultForLlm: "src/a.py:3: // ParserError example", contents: [{ type: "shell_exit", shellId: "0", exitCode: 0, cwd: d, outputPreview: "" }] },
+    });
+    assert.equal(out, undefined);
+  });
+  it("onSessionStart adds the PYTHONUTF8 note only when the variable is unset", async () => {
+    const without = g.buildHooks({ rulesDir, env: { ...guardEnv, PYTHONUTF8: "" }, log });
+    const w = await without.onSessionStart({ sessionId: "s", timestamp: new Date(), workingDirectory: d, source: "startup" });
+    assert.ok(w.additionalContext.includes("PYTHONUTF8 is not set"));
+    const withVar = g.buildHooks({ rulesDir, env: { ...guardEnv, PYTHONUTF8: "1" }, log });
+    const v = await withVar.onSessionStart({ sessionId: "s", timestamp: new Date(), workingDirectory: d, source: "startup" });
+    assert.ok(!v.additionalContext.includes("PYTHONUTF8 is not set"));
   });
   it("hooks fail open on garbage input", async () => {
     assert.equal(await hooks.onPreToolUse(null), undefined);

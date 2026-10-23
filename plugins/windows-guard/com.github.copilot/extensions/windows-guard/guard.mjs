@@ -484,6 +484,10 @@ const SHELL_FAILURE_RE =
 const JSON_FAILURE_RE = /Conversion from JSON failed|JSONDecodeError|Expecting value|Extra data/i;
 // PowerShell 7 prints "Set-Location:" and "Cannot find path ..." on different lines around a "Line |" block.
 const CD_FAILURE_RE = /(Set-Location|Push-Location|cd|sl|chdir|pushd):[\s\S]{0,400}?Cannot find path .* because it does not exist/i;
+// PowerShell's own error layout: 7 prints "Line |" with a ~~~ marker, 5.1 prints "At line:N char:N".
+const PS_ERROR_SHAPE_RE = /ParserError:|Line \|[\s\S]{0,300}?~|At line:\d+ char:\d+/i;
+const PYTHONUTF8_NOTE =
+  "Note: PYTHONUTF8 is not set in this environment. Python fails with UnicodeEncodeError ('charmap') when it prints non-ASCII text; set $env:PYTHONUTF8 = '1' before running Python (or permanently with: setx PYTHONUTF8 1).";
 
 const UNIX_MAP_COACH = {
   sed: "the edit tool for in-place edits, or -replace",
@@ -505,62 +509,102 @@ const UNIX_MAP_COACH = {
 };
 
 // Shared by both coach modes. Returns the guidance text or null when the error is not recognized.
-export function advise(tool, err, toolArgs = null) {
+export function advise(tool, err, toolArgs = null, ctx = {}) {
   const out = [];
   if (!err || /^Denied by preToolUse hook/.test(err)) return null; // the denial reason already carries the guidance
   if (SHELL_TOOLS.has(tool)) {
-    const term = err.match(/The term '([^']+)' is not recognized/i);
-    if (term) {
-      const name = term[1];
-      if (Object.hasOwn(UNIX_MAP_COACH, name)) {
-        out.push(`'${name}' is a Unix command; this shell is PowerShell on Windows. Use ${UNIX_MAP_COACH[name]}.`);
-      } else {
+    const isResult = ctx.mode === "result";
+    const exitCode = Number.isInteger(ctx.exitCode) ? ctx.exitCode : null;
+    const body = typeof ctx.body === "string" ? ctx.body : err;
+    const command = toolArgs && typeof toolArgs === "object" && typeof toolArgs.command === "string" ? toolArgs.command : "";
+    // In result mode a non-zero exit code is the failure signal; in failure mode the tool itself failed.
+    const failed = !isResult || exitCode === null || exitCode !== 0;
+    const hasErrorShape = PS_ERROR_SHAPE_RE.test(err);
+    // Benign exit codes are the whole answer.
+    if (isResult && exitCode === 1 && /(^|[|;&(\s])(git\s+grep|rg|grep|findstr|Select-String)\b/i.test(command) && !body) {
+      out.push("Exit code 1 from a search command with no output means no match, not an error.");
+    } else if (isResult && exitCode === 8 && /\bgh\s+pr\s+checks\b/i.test(command)) {
+      out.push("gh pr checks exits 8 while checks are pending; it is not an error. Re-run it later, or use --watch.");
+    } else if (isResult && exitCode === 1 && /-(ErrorAction|ea)\s*[: ]\s*(SilentlyContinue|0)\b/i.test(command) && body && !hasErrorShape) {
+      out.push("The command used -ErrorAction SilentlyContinue; the suppressed error still sets the exit code, and the output above is valid.");
+    } else {
+      const term = err.match(/The term '([^']+)' is not recognized/i);
+      if (term) {
+        const name = term[1];
+        if (Object.hasOwn(UNIX_MAP_COACH, name)) {
+          out.push(`'${name}' is a Unix command; this shell is PowerShell on Windows. Use ${UNIX_MAP_COACH[name]}.`);
+        } else {
+          out.push(
+            `'${name}' is not on PATH for the agent's shell (a fresh pwsh -NoProfile per command; your interactive profile does not apply). Check with Get-Command ${name}, or call the executable by full path.`,
+          );
+        }
+      }
+      if (/not a valid statement separator|The token .&&.|The token .\|\|./i.test(err)) {
         out.push(
-          `'${name}' is not on PATH for the agent's shell (a fresh pwsh -NoProfile per command; your interactive profile does not apply). Check with Get-Command ${name}, or call the executable by full path.`,
+          "The agent's shell is Windows PowerShell 5.1, where && and || are parse errors. Chain with ; instead. Installing PowerShell 7 (winget install Microsoft.PowerShell) and restarting the CLI removes this class of error.",
         );
       }
-    }
-    if (/not a valid statement separator|The token .&&.|The token .\|\|./i.test(err)) {
-      out.push(
-        "The agent's shell is Windows PowerShell 5.1, where && and || are parse errors. Chain with ; instead. Installing PowerShell 7 (winget install Microsoft.PowerShell) and restarting the CLI removes this class of error.",
-      );
-    }
-    const jsonHit = JSON_FAILURE_RE.test(err);
-    if (jsonHit) {
-      const command = toolArgs && typeof toolArgs === "object" && typeof toolArgs.command === "string" ? toolArgs.command : "";
-      out.push(
-        /2>&1/.test(command)
-          ? "The JSON parser received stderr text because of 2>&1. Use 2>$null (or 2>$errFile) before the pipe and check $LASTEXITCODE before parsing."
-          : "The input was not valid JSON. Check $LASTEXITCODE and the first line of the output before parsing; a tool that failed usually printed a message instead of JSON.",
-      );
-    }
-    if (
-      !jsonHit &&
-      /missing the terminator|Missing closing|Unexpected token|Unrecognized token|Missing expression|Missing argument|reserved for future use|ParserError/i.test(err)
-    ) {
-      out.push("This is a PowerShell parse error, almost always quoting.");
-      out.push(QUOTING);
-    }
-    if (CD_FAILURE_RE.test(err)) {
-      out.push(
-        "A cd/Set-Location failed but the later statements still ran in the previous folder; re-check their results. Create or correct the folder, or use Set-Location X -ErrorAction Stop so a failed cd stops the line.",
-      );
-    }
-    if (/\/dev\/null|Cannot find path .*\//i.test(err)) {
-      out.push(
-        "Forward-slash arguments such as /dev/null or /s are treated as paths. Use 2>$null, and PowerShell cmdlet parameters (-Recurse, -Force) instead of cmd.exe switches.",
-      );
-    }
-    if (/running scripts is disabled|UnauthorizedAccess.*\.ps1/i.test(err)) {
-      out.push("Execution policy blocked the script. Run it as: pwsh -NoProfile -ExecutionPolicy Bypass -File .\\script.ps1");
-    }
-    if (/being used by another process/i.test(err)) {
-      out.push(
-        "The file is locked by another process (often an editor or a build). Do not retry with a different write method; wait or ask the user.",
-      );
-    }
-    if (out.length === 0 && /unterminated|quote|unexpected.*string|syntax error/i.test(err)) {
-      out.push(QUOTING);
+      const jsonHit = JSON_FAILURE_RE.test(err);
+      if (jsonHit) {
+        out.push(
+          /2>&1/.test(command)
+            ? "The JSON parser received stderr text because of 2>&1. Use 2>$null (or 2>$errFile) before the pipe and check $LASTEXITCODE before parsing."
+            : "The input was not valid JSON. Check $LASTEXITCODE and the first line of the output before parsing; a tool that failed usually printed a message instead of JSON.",
+        );
+      }
+      // Parse errors after execution: only with a non-zero exit and PowerShell's own error layout, so the
+      // words "ParserError" or "Unexpected token" inside a search result at exit 0 stay silent.
+      if (
+        !jsonHit &&
+        failed &&
+        (!isResult || hasErrorShape) &&
+        /missing the terminator|Missing closing|Unexpected token|Unrecognized token|Missing expression|Missing argument|reserved for future use|ParserError/i.test(err)
+      ) {
+        out.push("This is a PowerShell parse error, almost always quoting.");
+        out.push(QUOTING);
+      }
+      if (CD_FAILURE_RE.test(err)) {
+        out.push(
+          "A cd/Set-Location failed but the later statements still ran in the previous folder; re-check their results. Create or correct the folder, or use Set-Location X -ErrorAction Stop so a failed cd stops the line.",
+        );
+      }
+      if (/\/dev\/null|Cannot find path .*\//i.test(err)) {
+        out.push(
+          "Forward-slash arguments such as /dev/null or /s are treated as paths. Use 2>$null, and PowerShell cmdlet parameters (-Recurse, -Force) instead of cmd.exe switches.",
+        );
+      }
+      if (/running scripts is disabled|UnauthorizedAccess.*\.ps1/i.test(err)) {
+        out.push("Execution policy blocked the script. Run it as: pwsh -NoProfile -ExecutionPolicy Bypass -File .\\script.ps1");
+      }
+      if (/being used by another process/i.test(err)) {
+        out.push(
+          "The file is locked by another process (often an editor or a build). Do not retry with a different write method; wait or ask the user.",
+        );
+      }
+      if (/UnicodeEncodeError|'charmap' codec can't encode|cp1252/i.test(err)) {
+        out.push(
+          "Python failed to print a non-ASCII character because the console code page is cp1252. Set $env:PYTHONUTF8 = '1' before the command (or permanently with: setx PYTHONUTF8 1) and rerun.",
+        );
+      }
+      const mod = err.match(/ModuleNotFoundError: No module named '([^']+)'/i);
+      if (mod) {
+        out.push(`Missing Python package '${mod[1]}'. Run it with uv instead of installing into the system interpreter: uv run --no-project --with ${mod[1]} python <script.py>`);
+      }
+      const spawn = err.match(/Failed to spawn:?\s*\\?([A-Za-z0-9_.-]+)/i);
+      if (spawn) {
+        out.push(`'${spawn[1]}' is not installed for this interpreter. Run it through uv: uv run --with ${spawn[1]} ${spawn[1]}`);
+      }
+      if (/Needed a single revision/i.test(err) && /rev-parse/i.test(command)) {
+        out.push("git rev-parse --short and --verify take one ref at a time; run it once per ref.");
+      }
+      if (/os error 123|volume label syntax is incorrect/i.test(err) && /\*/.test(command)) {
+        out.push(
+          "Native executables do not expand wildcards on Windows. Expand the pattern with Get-ChildItem first and pass the file names: Get-ChildItem <pattern> | ForEach-Object { <tool> $_.FullName }",
+        );
+      }
+      if (out.length === 0 && failed && /unterminated|quote|unexpected.*string|syntax error/i.test(err)) {
+        out.push(QUOTING);
+      }
     }
   } else if (WRITE_TOOLS.has(tool)) {
     // The CLI passes short error strings here ("No match found", "Parent directory does not exist").
@@ -589,7 +633,7 @@ export function advise(tool, err, toolArgs = null) {
 // postToolUseFailure: the CLI passes the tool's error string.
 export function coachFailure(tool, toolArgs, error, { env = process.env, log = writeGuardLog } = {}) {
   try {
-    return advise(String(tool ?? ""), String(error ?? ""), toolArgs);
+    return advise(String(tool ?? ""), String(error ?? ""), toolArgs, { mode: "failure", exitCode: null, body: String(error ?? "") });
   } catch (e) {
     log(`ERROR recovery-coach: ${e?.message ?? e}`, env);
     return null;
@@ -598,13 +642,31 @@ export function coachFailure(tool, toolArgs, error, { env = process.env, log = w
 
 // postToolUse on the shell tool: a non-zero exit arrives as a SUCCESSFUL result whose text ends
 // with "<shellId: N completed with exit code M>", so this is where ordinary errors are visible.
-export function coachResult(tool, toolArgs, text, { env = process.env, log = writeGuardLog } = {}) {
+// The structured exit code of a shell result ({ type: "shell_exit", exitCode } in toolResult.contents), or null.
+export function resultExitCode(toolResult) {
+  const contents = toolResult && typeof toolResult === "object" ? toolResult.contents : null;
+  if (!Array.isArray(contents)) return null;
+  for (const entry of contents) {
+    if (entry && entry.type === "shell_exit" && Number.isInteger(entry.exitCode)) return entry.exitCode;
+  }
+  return null;
+}
+
+export function coachResult(tool, toolArgs, text, { env = process.env, log = writeGuardLog, exitCode = null } = {}) {
   try {
     const t = String(tool ?? "");
     if (!SHELL_TOOLS.has(t)) return null;
     const err = String(text ?? "");
     if (!SHELL_FAILURE_RE.test(err)) return null;
-    return advise(t, err, toolArgs);
+    // The exit code comes from the structured result when the CLI provides it, else from the marker text.
+    let code = Number.isInteger(exitCode) ? exitCode : null;
+    let body = err;
+    const marker = err.match(/<shellId: \d+ completed with exit code (\d+)>/);
+    if (marker) {
+      if (code === null) code = Number(marker[1]);
+      body = err.slice(0, err.indexOf("<shellId:")).trim();
+    }
+    return advise(t, err, toolArgs, { mode: "result", exitCode: code, body });
   } catch (e) {
     log(`ERROR recovery-coach: ${e?.message ?? e}`, env);
     return null;
@@ -662,8 +724,9 @@ export function buildHooks({ rulesDir, env = process.env, log = writeGuardLog } 
   return {
     onSessionStart: (input) =>
       protect("sessionStart", input, () => {
-        const text = loadRules(rulesDir);
+        let text = loadRules(rulesDir);
         if (!text) return undefined;
+        if (!env.PYTHONUTF8) text = `${text}\n\n${PYTHONUTF8_NOTE}`;
         if (debug) log(`INJECTED rules (${text.length} chars)`, env);
         return { additionalContext: text };
       }),
@@ -693,7 +756,7 @@ export function buildHooks({ rulesDir, env = process.env, log = writeGuardLog } 
           return undefined;
         }
         if (SHELL_TOOLS.has(tool)) {
-          const advice = coachResult(tool, getToolArgs(input), resultText(input?.toolResult), opts);
+          const advice = coachResult(tool, getToolArgs(input), resultText(input?.toolResult), { ...opts, exitCode: resultExitCode(input?.toolResult) });
           if (advice) log(`COACHED ${tool} (result, ${advice.length} chars)`, env);
           return advice ? { additionalContext: advice } : undefined;
         }

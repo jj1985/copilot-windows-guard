@@ -294,6 +294,17 @@ Test-CoachResult 'edit' @{ path = 'a.txt' } "No match found" $false
 Test-CoachResult 'powershell' @{ command = 'cd C:\nonexistent; Get-Location' } "Set-Location: Cannot find path 'C:\nonexistent' because it does not exist.`nC:\old`n<shellId: 0 completed with exit code 0>" $true 'previous folder'
 Test-CoachResult 'powershell' @{ command = 'gh api repos/o/r 2>&1 | ConvertFrom-Json' } "ConvertFrom-Json: Conversion from JSON failed with error: Unexpected character encountered while parsing value: g. Path '', line 0, position 0.`n<shellId: 0 completed with exit code 1>" $true 'LASTEXITCODE'
 Test-CoachResult 'powershell' @{ command = 'python parse.py' } "json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)`n<shellId: 0 completed with exit code 1>" $true 'first line'
+# Phase 4: exit-code and error-shape gating, benign exits, new branches.
+Test-CoachResult 'powershell' @{ command = 'Select-String -Path src\a.js -Pattern Unexpected' } "src\a.js:12:  // Unexpected token in parser`n<shellId: 0 completed with exit code 0>" $false
+Test-CoachResult 'powershell' @{ command = 'echo "a' } "At line:1 char:6`n+ echo `"a`n+      ~~`nThe string is missing the terminator: `".`n<shellId: 0 completed with exit code 1>" $true 'quoting'
+Test-CoachResult 'powershell' @{ command = 'git grep -n "TODO"' } "<shellId: 0 completed with exit code 1>" $true 'no match'
+Test-CoachResult 'powershell' @{ command = 'gh pr checks 12' } "build  pending  0  https://example.com/checks/1`n<shellId: 0 completed with exit code 8>" $true 'pending'
+Test-CoachResult 'powershell' @{ command = 'Get-Item a.txt, missing.txt -ErrorAction SilentlyContinue' } "a.txt`n<shellId: 0 completed with exit code 1>" $true 'output above is valid'
+Test-CoachResult 'powershell' @{ command = 'python report.py' } "UnicodeEncodeError: 'charmap' codec can't encode character '\u2713' in position 0: character maps to <undefined>`n<shellId: 0 completed with exit code 1>" $true 'PYTHONUTF8'
+Test-CoachResult 'powershell' @{ command = 'python tool.py' } "ModuleNotFoundError: No module named 'requests'`n<shellId: 0 completed with exit code 1>" $true 'uv run --no-project --with requests'
+Test-CoachResult 'powershell' @{ command = 'pytest' } "Failed to spawn: \pytest`n<shellId: 0 completed with exit code 1>" $true 'uv run --with pytest pytest'
+Test-CoachResult 'powershell' @{ command = 'git rev-parse --short a1b2c3 d4e5f6' } "fatal: Needed a single revision`n<shellId: 0 completed with exit code 128>" $true 'one ref'
+Test-CoachResult 'powershell' @{ command = 'rg -n TODO src\*.py' } "rg: src\*.py: The filename, directory name, or volume label syntax is incorrect. (os error 123)`n<shellId: 0 completed with exit code 2>" $true 'Get-ChildItem'
 
 # ---------------------------------------------------------------- inject-rules
 Write-Host "`n--- inject-rules.ps1"
@@ -301,6 +312,12 @@ $r = Invoke-Hook 'inject-rules.ps1' (@{ sessionId = 's'; timestamp = 1; cwd = $W
 $ctx = ''
 try { $ctx = [string](($r.Out | ConvertFrom-Json).additionalContext) } catch { }
 Assert (($r.Code -eq 0) -and ($ctx -like '*Windows environment rules*') -and ($ctx -like '*edit and create tools*')) 'sessionStart injects the rules file as additionalContext' "code=$($r.Code) out=$($r.Out.Substring(0, [Math]::Min(200, $r.Out.Length)))"
+$r = Invoke-Hook 'inject-rules.ps1' (@{ sessionId = 's'; timestamp = 1; cwd = $Work; source = 'startup' }) @{ PYTHONUTF8 = $null }
+$ctx = ''; try { $ctx = [string](($r.Out | ConvertFrom-Json).additionalContext) } catch { }
+Assert ($ctx -like '*PYTHONUTF8 is not set*') 'sessionStart adds the PYTHONUTF8 note when the variable is unset' "out=$($r.Out.Substring(0, [Math]::Min(200, $r.Out.Length)))"
+$r = Invoke-Hook 'inject-rules.ps1' (@{ sessionId = 's'; timestamp = 1; cwd = $Work; source = 'startup' }) @{ PYTHONUTF8 = '1' }
+$ctx = ''; try { $ctx = [string](($r.Out | ConvertFrom-Json).additionalContext) } catch { }
+Assert ($ctx -and ($ctx -notlike '*PYTHONUTF8 is not set*')) 'sessionStart omits the PYTHONUTF8 note when the variable is set' "out=$($r.Out.Substring(0, [Math]::Min(200, $r.Out.Length)))"
 
 # ---------------------------------------------------------------- hooks.json launcher end-to-end
 Write-Host "`n--- hooks.json inline launcher"
