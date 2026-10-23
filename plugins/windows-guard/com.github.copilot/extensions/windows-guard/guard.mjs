@@ -2,13 +2,15 @@
 //
 // Plain Node.js (18+), no dependencies and no SDK import, so the same module runs under
 // `node --test` (tests/extension.test.mjs) and inside the extension process (extension.mjs).
-// It mirrors scripts/*.ps1 rule for rule and message for message; keep the two in sync.
+// The coach, the normalizer and the gate mirror scripts/*.ps1 rule for rule and message for message;
+// the shell-guard rules are not duplicated at all: both engines run scripts/analyze-command.ps1.
 // Every entry point fails open: an internal error is logged and the tool call proceeds untouched.
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 export const SHELL_TOOLS = new Set(["bash", "powershell"]);
 export const EDIT_TOOLS = new Set(["edit", "str_replace_editor", "apply_patch"]);
@@ -105,9 +107,10 @@ function run(file, args, { env = process.env, timeout = 5000 } = {}) {
         args,
         { env, timeout, windowsHide: true, maxBuffer: 8 * 1024 * 1024, encoding: "utf8" },
         (err, stdout, stderr) => {
-          const text = `${stdout ?? ""}${stderr ?? ""}`.trim();
-          if (err && typeof err.code !== "number") return resolve({ code: 999, text, error: err });
-          resolve({ code: err ? err.code : 0, text, error: err ?? null });
+          const out = String(stdout ?? "");
+          const text = `${out}${stderr ?? ""}`.trim();
+          if (err && typeof err.code !== "number") return resolve({ code: 999, text, stdout: out, error: err });
+          resolve({ code: err ? err.code : 0, text, stdout: out, error: err ?? null });
         },
       );
     } catch (error) {
@@ -310,149 +313,44 @@ async function normalizeFile(full, policy) {
 
 // ------------------------------------------------------------------ shell-guard
 
-const CHEAT_SHEET =
-  "PowerShell quoting: single quotes are literal (double a single quote to embed it: 'it''s'); inside double quotes $x expands and a literal double quote is written as two double quotes or backtick-quote; backslash is NOT an escape character. Multi-line or heavily quoted content: create a .ps1 (or a data file) with the create tool and run pwsh -NoProfile -ExecutionPolicy Bypass -File .\\script.ps1. File content always goes through the edit/create tool, never through the shell.";
+// The rules live in scripts/analyze-command.ps1, shared with the PowerShell hook, and run on
+// PowerShell's own AST. The extension runs that script in one pwsh (or powershell.exe) process per
+// distinct command text and caches the decision. Fails open: no host, a crash or a timeout allows.
+const here = path.dirname(fileURLToPath(import.meta.url));
+export const analyzerScript = path.resolve(here, "..", "..", "..", "scripts", "analyze-command.ps1");
+const HOST_ARGS = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", analyzerScript];
+const analysisCache = new Map();
 
-// PowerShell's -match is case-insensitive, so every rule carries the i flag.
-const RULES = [
-  {
-    re: /<<-?\s*['"]?[A-Za-z_]\w*/i,
-    bypass: false,
-    why: "Bash heredocs do not exist in PowerShell. Put file content through the edit/create tool, or create a .ps1 with the create tool and run: pwsh -NoProfile -ExecutionPolicy Bypass -File .\\script.ps1",
-  },
-  {
-    re: /2>\s*\/dev\/null/i,
-    bypass: false,
-    why: "Use 2>$null to discard errors; PowerShell treats /dev/null as a file path.",
-  },
-  {
-    re: /^\s*(export\s+)?[A-Za-z_][A-Za-z0-9_]*=[^=\s]\S*\s+[A-Za-z$.&]/i,
-    bypass: false,
-    why: "Bash-style environment assignment (VAR=value cmd, export VAR=value) does not work in PowerShell. Use: $env:VAR = 'value'; <command>",
-  },
-  {
-    re: /^\s*echo\s+-[en]\b/i,
-    bypass: true,
-    why: "echo is Write-Output in PowerShell and has no -e/-n flags. Use Write-Output 'text' or Write-Host -NoNewline.",
-  },
-  {
-    re: /^\s*(dir|del|erase|rd|rmdir|md|copy|move|type|ren)\s+(\S+\s+)?\/[a-z]/i,
-    bypass: false,
-    why: "cmd.exe switches (/s, /q, /f) do not work in PowerShell. Use Get-ChildItem -Recurse, Remove-Item -Recurse -Force, Copy-Item, Move-Item, Get-Content, Rename-Item.",
-  },
-  {
-    re: /\b(python3?|py|node)\s+-[ce]\s+.*(open\s*\(|\.write|writeFileSync|writeFile|write_text|write_bytes)/i,
-    bypass: true,
-    why: "Do not write files through an inline python -c / node -e one-liner: quoting fails and the file gets CRLF or the wrong encoding. Use the edit/create tool for the content, or create a script file with the create tool and run it.",
-  },
-  {
-    re: /\b(Set-Content|Add-Content|Out-File|Tee-Object)\b(?![^|;]*-Encoding\s+(utf8NoBOM|utf8|ascii)\b)/i,
-    bypass: true,
-    why: "Shell writes must pass -Encoding utf8NoBOM (and they still write CRLF). File content belongs in the edit/create tool; to capture command output use: <command> | Out-File -Encoding utf8NoBOM -FilePath <path>",
-  },
-  {
-    re: /(?<![-<])(?:\b[1-6*])?>{1,2}\s*(?!\$null\b)(?!&\d)[^\s|;&>]+/i,
-    bypass: true,
-    why: "Redirecting to a file writes CRLF (and UTF-16LE under Windows PowerShell 5.1). Use the edit/create tool for file content, or <command> | Out-File -Encoding utf8NoBOM -FilePath <path> to capture output. Add  # wg:allow  if this redirect is intentional.",
-  },
-  {
-    re: /\$home\s*=/i,
-    bypass: false,
-    why: "$home is PowerShell's HOME variable; assigning it can point destructive commands at the real profile. Use another variable name.",
-  },
-];
+// A decision depends on the command, on WINDOWS_GUARD_PARSER and on PATH (installed Unix tools).
+const cacheKey = (cmd, env) => `${env.WINDOWS_GUARD_PARSER ?? ""}\0${env.PATH ?? env.Path ?? ""}\0${cmd}`;
 
-const UNIX_MAP_GUARD = {
-  sed: "the edit tool (for in-place edits) or -replace",
-  awk: "ForEach-Object / -split",
-  grep: "Select-String",
-  head: "Select-Object -First N",
-  tail: "Get-Content -Tail N",
-  touch: "New-Item -ItemType File",
-  which: "Get-Command",
-  export: "$env:NAME = 'value'",
-  chmod: "icacls (usually unnecessary on Windows)",
-  ln: "New-Item -ItemType SymbolicLink",
-  wc: "Measure-Object -Line/-Word/-Character",
-  xargs: "ForEach-Object",
-  find: "Get-ChildItem -Recurse -Filter",
-  cut: "-split / Select-Object",
-  tr: "-replace",
-  uniq: "Sort-Object -Unique",
-};
-
-// Unix commands in command position (start, or after | ; & ( ). Case-sensitive like the original.
-const UNIX_CMD_RE = /(?:^|[|;&(]\s*)(sed|awk|grep|head|tail|touch|which|export|chmod|ln|wc|xargs|find|cut|tr|uniq)(?=\s|$)/gm;
-
-// Mirrors shell-guard.ps1 with one deliberate difference: the PowerShell parser runs LAST and
-// only when every cheap rule passed, because it costs a pwsh process. Returns null (allow) or
-// { permissionDecision: "deny", permissionDecisionReason }.
-export async function shellGuard(command, { env = process.env, log = writeGuardLog, parser = true } = {}) {
-  const cmd = typeof command === "string" ? command : "";
-  if (!cmd) return null;
-  try {
-    const bypass = /#\s*wg:allow/.test(cmd);
-
-    for (const r of RULES) {
-      if (!r.re.test(cmd)) continue;
-      if (r.bypass && bypass) continue;
-      return deny(r.why);
-    }
-
-    for (const m of cmd.matchAll(UNIX_CMD_RE)) {
-      const name = m[1];
-      const app = findExecutable(name, env);
-      // Windows ships its own find.exe in System32; it is not GNU find.
-      if (app && !(name === "find" && /[\\/]System32[\\/]/i.test(app))) continue;
-      if (bypass) continue;
-      return deny(
-        `'${name}' is a Unix command and is not installed in this PowerShell session. Use ${UNIX_MAP_GUARD[name]}. For in-place file edits use the edit tool, not sed. Add  # wg:allow  if you have confirmed the tool exists.`,
-      );
-    }
-
-    if (/\\"/.test(cmd) && !/'/.test(cmd) && !bypass) {
-      return deny(
-        `\\" is not an escape sequence in PowerShell. ${CHEAT_SHEET} For JSON or other quote-heavy arguments to native tools, write the payload to a file with the create tool and pass the file name (for example --body-file or --input).`,
-      );
-    }
-
-    if (parser && String(env.WINDOWS_GUARD_PARSER ?? "").toLowerCase() !== "off") {
-      const errors = await parsePowerShell(cmd, { env, log });
-      if (errors && errors.length > 0) {
-        return deny(`PowerShell cannot parse this command: ${errors.slice(0, 3).join(" | ")}. ${CHEAT_SHEET}`);
-      }
-    }
-  } catch (e) {
-    log(`ERROR shell-guard: ${e?.message ?? e}`, env);
-  }
-  return null;
+function remember(key, decision) {
+  if (analysisCache.size >= 4096) analysisCache.clear();
+  analysisCache.set(key, decision);
 }
 
-const PARSE_SCRIPT =
-  "$p = $env:WG_PARSE_FILE; $t = $null; $e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile($p, [ref]$t, [ref]$e); if ($e) { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); $e | Select-Object -First 3 | ForEach-Object { $_.Message.Trim() } }";
-const parseCache = new Map();
+function normalizeDecision(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  if (raw.decision === "deny") return { decision: "deny", rule: String(raw.rule ?? ""), reason: String(raw.reason ?? "") };
+  return { decision: "allow" };
+}
 
-// Runs the command text through PowerShell's own parser (pwsh, else powershell.exe) and returns
-// the error messages, [] when it parses, or null when the check could not run (fail open).
-export async function parsePowerShell(cmd, { env = process.env, log = writeGuardLog } = {}) {
-  if (parseCache.has(cmd)) return parseCache.get(cmd);
+// The analyzer's decision for one command: { decision: "allow" } or { decision: "deny", rule, reason };
+// null when the analyzer could not run.
+export async function analyzeCommand(cmd, { env = process.env, log = writeGuardLog } = {}) {
+  const key = cacheKey(cmd, env);
+  if (analysisCache.has(key)) return analysisCache.get(key);
   const host = findExecutable("pwsh", env) ?? findExecutable("powershell", env);
   if (!host) return null;
-  const tmp = path.join(os.tmpdir(), `wg-parse-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.ps1`);
-  let result = null;
+  const tmp = path.join(os.tmpdir(), `wg-cmd-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`);
+  let decision = null;
   try {
-    fs.writeFileSync(tmp, `\uFEFF${cmd}`, "utf8");
-    const r = await run(host, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", PARSE_SCRIPT], {
-      env: { ...env, WG_PARSE_FILE: tmp },
-      timeout: 10000,
-    });
-    if (r.code === 0) {
-      result = r.text ? r.text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) : [];
-    } else {
-      log(`WARN parser host exited ${r.code}: ${r.text.slice(0, 200)}`, env);
-    }
+    fs.writeFileSync(tmp, cmd, "utf8");
+    const r = await run(host, HOST_ARGS, { env: { ...env, WG_COMMAND_FILE: tmp }, timeout: 10000 });
+    if (r.code === 0 && r.stdout.trim()) decision = normalizeDecision(JSON.parse(r.stdout));
+    else log(`WARN analyzer exited ${r.code}: ${r.text.slice(0, 200)}`, env);
   } catch (e) {
-    log(`ERROR parser: ${e?.message ?? e}`, env);
+    log(`ERROR analyzer: ${e?.message ?? e}`, env);
   } finally {
     try {
       fs.unlinkSync(tmp);
@@ -460,47 +358,37 @@ export async function parsePowerShell(cmd, { env = process.env, log = writeGuard
       // already gone
     }
   }
-  if (result) {
-    if (parseCache.size >= 4096) parseCache.clear();
-    parseCache.set(cmd, result);
-  }
-  return result;
+  if (decision) remember(key, decision);
+  return decision;
 }
 
-const PARSE_BATCH_SCRIPT =
-  "$d = $env:WG_PARSE_DIR; $o = @{}; Get-ChildItem -LiteralPath $d -Filter *.ps1 | ForEach-Object { $t = $null; $e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$t, [ref]$e); $m = @(); if ($e) { $m = @($e | Select-Object -First 3 | ForEach-Object { $_.Message.Trim() }) }; $o[$_.BaseName] = $m }; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); $o | ConvertTo-Json -Compress -Depth 3";
-
-// Parses many commands in ONE PowerShell process and fills the parser cache, so a replay of a
-// large corpus does not pay one pwsh start per command. Returns the number of commands parsed.
-// Not used on the hook path, where commands arrive one at a time.
-export async function parsePowerShellBatch(commands, { env = process.env, log = writeGuardLog } = {}) {
-  const todo = [...new Set(commands.filter((c) => typeof c === "string" && c && !parseCache.has(c)))];
+// Analyzes many commands in ONE PowerShell process and fills the cache, so a replay of a large
+// corpus does not pay one process start per command. Not used on the hook path.
+export async function analyzeCommandBatch(commands, { env = process.env, log = writeGuardLog } = {}) {
+  const todo = [...new Set(commands.filter((c) => typeof c === "string" && c && !analysisCache.has(cacheKey(c, env))))];
   if (todo.length === 0) return 0;
   const host = findExecutable("pwsh", env) ?? findExecutable("powershell", env);
   if (!host) return 0;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wg-parse-batch-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wg-cmd-batch-"));
   try {
-    todo.forEach((c, i) => fs.writeFileSync(path.join(dir, `${i}.ps1`), `\uFEFF${c}`, "utf8"));
-    const r = await run(host, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", PARSE_BATCH_SCRIPT], {
-      env: { ...env, WG_PARSE_DIR: dir },
-      timeout: 600000,
-    });
-    if (r.code !== 0) {
-      log(`WARN batch parser host exited ${r.code}: ${r.text.slice(0, 200)}`, env);
+    todo.forEach((c, i) => fs.writeFileSync(path.join(dir, `${i}.txt`), c, "utf8"));
+    const r = await run(host, HOST_ARGS, { env: { ...env, WG_COMMAND_DIR: dir }, timeout: 600000 });
+    if (r.code !== 0 || !r.stdout.trim()) {
+      log(`WARN batch analyzer exited ${r.code}: ${r.text.slice(0, 200)}`, env);
       return 0;
     }
-    const map = JSON.parse(r.text);
+    const map = JSON.parse(r.stdout);
     let n = 0;
     todo.forEach((c, i) => {
-      const errors = map[String(i)];
-      if (Array.isArray(errors)) {
-        parseCache.set(c, errors.map((m) => String(m)));
+      const d = normalizeDecision(map[String(i)]);
+      if (d) {
+        remember(cacheKey(c, env), d);
         n++;
       }
     });
     return n;
   } catch (e) {
-    log(`ERROR batch parser: ${e?.message ?? e}`, env);
+    log(`ERROR batch analyzer: ${e?.message ?? e}`, env);
     return 0;
   } finally {
     try {
@@ -509,6 +397,19 @@ export async function parsePowerShellBatch(commands, { env = process.env, log = 
       // best effort
     }
   }
+}
+
+// Mirrors shell-guard.ps1. Returns null (allow) or { permissionDecision: "deny", permissionDecisionReason }.
+export async function shellGuard(command, { env = process.env, log = writeGuardLog } = {}) {
+  const cmd = typeof command === "string" ? command : "";
+  if (!cmd) return null;
+  try {
+    const d = await analyzeCommand(cmd, { env, log });
+    if (d && d.decision === "deny") return { permissionDecision: "deny", permissionDecisionReason: d.reason };
+  } catch (e) {
+    log(`ERROR shell-guard: ${e?.message ?? e}`, env);
+  }
+  return null;
 }
 
 // ------------------------------------------------------------------ utf8-gate

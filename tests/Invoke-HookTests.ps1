@@ -200,8 +200,24 @@ Test-Guard '$x = 5; Write-Output "x is $x"' $false
 Test-Guard 'node -e "console.log(1)"' $false
 Test-Guard 'npm run build -- ''{\"a\":1}''' $false
 Test-Guard '[IO.File]::WriteAllText(''x.txt'', ''hi'', [Text.UTF8Encoding]::new($false))' $false
-Test-Guard 'Get-Content x | Select-String -Pattern "a>b"' $true
+Test-Guard 'Get-Content x | Select-String -Pattern "a>b"' $false
 Test-Guard 'Get-Content x | Select-String -Pattern "a>b" # wg:allow' $false
+# AST rules: text inside strings and here-strings is content, not syntax.
+Test-Guard "Select-String -Path log.txt -Pattern '<[^>]+>'" $false
+Test-Guard 'Write-Output "key => value"' $false
+Test-Guard "@'`nif i >= 0:`n    print(i)`n'@ | python -" $false
+Test-Guard 'python -c "import json; print(json.load(open(''cfg.json''))[''name''])"' $false
+Test-Guard 'gh pr comment 12 --body "Rebased onto main (head ecba1d7)"' $false
+Test-Guard "wsl bash -lc 'ls -la | head -3'" $false
+Test-Guard "Select-String -Path a.txt -Pattern '<<<<<<< HEAD'" $false
+Test-Guard 'cd "C:\build\"; Get-ChildItem' $false
+Test-Guard 'python -c "d = {''a'': 1}; print(\"ok\")"' $true
+Test-Guard "python -c `"import os`nfor f in os.listdir('.'):`n    print(f)`"" $true 'here-string'
+Test-Guard "python -c `"import os`nprint(os.getcwd())`" # wg:allow" $false
+Test-Guard 'sort < names.txt' $true 'Get-Content'
+Test-Guard 'Get-ChildItem | ForEach-Object { head $_ }' $true 'Select-Object'
+Test-Guard 'dotnet build 2> errors.txt' $true 'edit/create tool'
+Test-Guard "'x' | Set-Content -Encoding:utf8 out.txt" $false
 
 # ---------------------------------------------------------------- utf8-gate
 Write-Host "`n--- utf8-gate.ps1"

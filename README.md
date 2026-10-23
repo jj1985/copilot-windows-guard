@@ -28,7 +28,7 @@ Hooks are the only user-controlled layer that sits between the model and the fil
 | Hook | Event | Effect |
 |---|---|---|
 | `normalize-eol.ps1` | `postToolUse` on `edit`, `create`, `str_replace_editor`, `apply_patch` | Rewrites the file to the intended line ending and removes the BOM, milliseconds after the tool wrote it. Intended ending: `.gitattributes eol=` → `core.autocrlf=true` → what the git index already holds → `.bat`/`.cmd`/`.sln` list → LF. Respects `-text`. |
-| `shell-guard.ps1` | `preToolUse` on the shell tool | Runs the command through PowerShell's own parser and denies anything that does not parse (unterminated strings, bash `for`/`[ ]`, stray `\"`), with the exact error. Also denies heredocs, Unix commands that are not installed (`grep`, `head`, `sed`, ...), `2>/dev/null`, `VAR=x cmd`, cmd.exe switches, file redirection, `Set-Content`/`Out-File` without `-Encoding utf8NoBOM`, inline `python -c`/`node -e` file writes, and `$home =`. Every denial reason contains the PowerShell form to use instead. |
+| `shell-guard.ps1` | `preToolUse` on the shell tool | Decides on PowerShell's own AST (`scripts/analyze-command.ps1`, shared with the extension): denies heredocs and `<` input redirection, Unix commands that are not installed (`grep`, `head`, `sed`, ...), `2>/dev/null`, `VAR=x cmd`, cmd.exe switches, real file redirects, `Set-Content`/`Out-File` without `-Encoding utf8NoBOM`, inline `python -c`/`node -e` file writes and multi-line one-liners, bash `\"` escapes, `$home =`, and anything that does not parse, with the exact error. A `>` inside a string or a here-string, or `head` inside a quoted argument, is content and passes. Every denial reason contains the PowerShell form to use instead. |
 | `utf8-gate.ps1` | `preToolUse` on `edit`, `str_replace_editor`, `apply_patch` | Refuses to edit a file that is Windows-1252, UTF-16 or otherwise not UTF-8, because the edit tool would corrupt it irreversibly, and tells the agent to ask you first. |
 | `recovery-coach.ps1` | `postToolUse` on the shell tool, and `postToolUseFailure` on all tools | When a command exits non-zero or an edit fails, recognizes the cause (quoting, bash-ism, 5.1 syntax, "No match found", locked file, execution policy) and appends concrete recovery steps to what the agent sees. The edit guidance explicitly forbids rewriting the whole file as a workaround. (Copilot CLI reports a failed shell command as a successful tool call with the exit code in the text, which is why the shell path uses `postToolUse`.) |
 
@@ -47,6 +47,7 @@ Plus two instruction components:
 - **Rules you can bypass.** Heuristic rules (file redirection, `echo -n`, the Unix-command check) accept `# wg:allow` anywhere in the command. The denial reason tells the agent so.
 - **Works under PowerShell 5.1 too.** The launcher prefers `pwsh` and falls back to `powershell.exe`; the scripts use no 7-only syntax.
 - **Payload read as raw bytes.** Hook input is decoded as UTF-8 directly from the stdin stream, so a host console code page cannot mangle it.
+- **One analyzer for both engines.** The shell-guard rules are evaluated on PowerShell's AST and tokens in `scripts/analyze-command.ps1`, dot-sourced by the hook and run by the extension in one PowerShell process per distinct command. The regexes over raw text that denied a `>` inside a quoted pattern or `head` inside a quoted argument are gone, and the replay corpus's parity check keeps the two engines identical.
 - **Failure guidance as JSON with exit 0.** The CLI hooks reference says a `postToolUseFailure` command hook returns its guidance as plain text with exit code 2. On CLI 1.0.103 neither that form nor JSON with exit 2 reaches the model; only `{"additionalContext": ...}` with exit 0 does (verified live on 2026-10-23 with all three forms), so both engines answer that way. The CLI passes short error strings to this event (`No match found`, `Parent directory does not exist`), and the coach matches those.
 
 ## Extension mode (experimental)
@@ -87,8 +88,8 @@ Median of 5 on the same machine (CLI 1.0.103, PowerShell 7.5):
 
 | Hooked event | PowerShell hooks | Extension mode |
 |---|---|---|
-| shell command, allowed | 560 ms | 180 ms (one `pwsh` for the parser check; 0 ms when the same command text repeats) |
-| shell command, denied by a rule | 566 ms | < 1 ms |
+| shell command, allowed | 560 ms | 280 ms (one PowerShell process runs the AST analyzer; 0 ms when the same command text repeats) |
+| shell command, denied by a rule | 566 ms | 280 ms (same analyzer run) |
 | edit or create outside a repository | 617 ms | 32 ms (one `git rev-parse`) |
 | edit of a non-UTF-8 file | ~560 ms | < 1 ms |
 | launcher that exits at once | n/a | ~250 ms per hooked event (process start plus the marker check), still paid |
@@ -99,7 +100,7 @@ Trade-offs:
 
 - **Experimental mode is required**, and the extension API is explicitly subject to change.
 - **An approval prompt for every user.** A plugin-shipped extension is discovered for everyone who runs with `--experimental`, including in the default mode where it stays idle. `/extensions mode` set to Disabled turns extensions off entirely; the PowerShell hooks take over on their own because no liveness marker is written.
-- **Parser check still spawns PowerShell**, but only after every cheap rule passed, once per distinct command text. `WINDOWS_GUARD_PARSER=off` removes it; unterminated strings and bash `for` / `[ -f x ]` syntax are then caught only after execution, by the coach.
+- **The analyzer runs in a PowerShell process** per distinct shell command (about 0.2 s, cached per command text), because the rules are evaluated on PowerShell's AST; both engines share that script, so there is nothing to keep in sync. `WINDOWS_GUARD_PARSER=off` only stops denials for commands that fail to parse.
 - **Tool failures.** The SDK documents that extension hooks see only `"failure"` results, not `"rejected"`, `"denied"` or `"timeout"`, and copilot-sdk#1220 tracked failures not reaching extensions at all. Verified on CLI 1.0.103: `onPostToolUseFailure` fires for an edit-tool `No match found` and the model receives the recovery steps. Other failure kinds were not tested.
 - **`-p` automation** shows the extension's one-line startup message in the output.
 - **Windows only.** On macOS and Linux the extension joins the session and does nothing, like the hooks.
@@ -210,7 +211,7 @@ Environment variables shared by both engines. PowerShell hooks read them per eve
 | `WINDOWS_GUARD_KEEP_BOM_EXT` | (empty) | Extensions whose existing BOM is preserved, for example `.ps1` if non-ASCII scripts must run under Windows PowerShell 5.1. |
 | `WINDOWS_GUARD_DEBUG` | (unset) | Log every raw hook payload. |
 | `WINDOWS_GUARD_MODE` | (unset) | `extension` makes every `hooks.json` launcher exit immediately while the extension is running for the session (liveness marker present and its process alive); otherwise the PowerShell scripts run as usual. Needs the experimental branch's plugin and experimental features on to gain anything. See [Extension mode](#extension-mode-experimental). |
-| `WINDOWS_GUARD_PARSER` | (unset) | `off` skips the PowerShell parser check in extension mode (the hooks always run it). |
+| `WINDOWS_GUARD_PARSER` | (unset) | `off` stops both engines from denying a command only because it does not parse; the AST rules still run. |
 
 The most reliable way to express a repository's line-ending policy is `.gitattributes`, which the normalizer treats as the single source of truth:
 

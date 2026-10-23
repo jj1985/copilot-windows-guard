@@ -214,7 +214,7 @@ describe("normalizeEol", () => {
 });
 
 // ---------------------------------------------------------------- shell-guard
-describe("shellGuard", () => {
+describe("shellGuard", { skip: !pwsh && "no PowerShell host for the analyzer" }, () => {
   async function expectGuard(cmd, expectDeny, hint = "") {
     const d = await g.shellGuard(cmd, { ...opts, env: guardEnv });
     const denied = Boolean(d && d.permissionDecision === "deny");
@@ -224,7 +224,6 @@ describe("shellGuard", () => {
       assert.ok(reason.toLowerCase().includes(hint.toLowerCase()), `hint '${hint}' missing in: ${reason}`);
     }
   }
-  const parserOpts = { skip: !pwsh && "no PowerShell host for the parser check" };
 
   it("deny: heredoc", () => expectGuard("cat <<EOF > x.txt\nhello\nEOF", true));
   it("deny: head -5 file.txt", () => expectGuard("head -5 file.txt", true, "Select-Object"));
@@ -235,14 +234,14 @@ describe("shellGuard", () => {
   it("deny: Set-Content without encoding", () => expectGuard('"text" | Set-Content out.txt', true, "utf8NoBOM"));
   it("allow: Out-File -Encoding utf8NoBOM", () => expectGuard("Get-Content x.txt | Out-File -Encoding utf8NoBOM -FilePath y.txt", false));
   it("deny: $home assignment", () => expectGuard("$home = 'C:\\x'; Remove-Item -Recurse -Force $home", true, "HOME"));
-  it("deny: unterminated string (parser)", parserOpts, () => expectGuard('echo "unterminated', true, "cannot parse"));
+  it("deny: unterminated string (parser)", () => expectGuard('echo "unterminated', true, "cannot parse"));
   it("deny: bash escaped quotes", () => expectGuard('echo "{\\"a\\":1}"', true));
   it("deny: VAR=value cmd", () => expectGuard("FOO=bar npm run build", true, "$env:"));
   it("deny: export VAR=value", () => expectGuard("export FOO=bar", true, "$env:"));
   it("deny: dir /s", () => expectGuard("dir /s *.cs", true, "Get-ChildItem"));
   it("deny: python -c file write", () => expectGuard("python -c \"open('x','w').write('hi')\"", true, "create tool"));
   it("deny: find . -name", () => expectGuard('find . -name "*.cs"', true, "Get-ChildItem"));
-  it("deny: bash for loop (parser)", parserOpts, () => expectGuard("for f in *.txt; do echo $f; done", true, "cannot parse"));
+  it("deny: bash for loop (parser)", () => expectGuard("for f in *.txt; do echo $f; done", true, "cannot parse"));
   it("deny: echo -e", () => expectGuard('echo -e "a\\nb"', true, "Write-Output"));
   it("allow: Select-Object -First", () => expectGuard("Get-Content x.txt | Select-Object -First 5", false));
   it("allow: 2>$null", () => expectGuard("dotnet build 2>$null", false));
@@ -258,7 +257,7 @@ describe("shellGuard", () => {
   it("allow: node -e console.log", () => expectGuard('node -e "console.log(1)"', false));
   it("allow: JSON in single quotes", () => expectGuard("npm run build -- '{\\\"a\\\":1}'", false));
   it("allow: [IO.File]::WriteAllText", () => expectGuard("[IO.File]::WriteAllText('x.txt', 'hi', [Text.UTF8Encoding]::new($false))", false));
-  it("deny: > inside a quoted pattern (heuristic)", () => expectGuard('Get-Content x | Select-String -Pattern "a>b"', true));
+  it("allow: > inside a quoted pattern (AST, not text)", () => expectGuard('Get-Content x | Select-String -Pattern "a>b"', false));
   it("allow: > inside a quoted pattern # wg:allow", () => expectGuard('Get-Content x | Select-String -Pattern "a>b" # wg:allow', false));
   it("allow: empty or missing command", async () => {
     assert.equal(await g.shellGuard("", opts), null);
@@ -268,10 +267,25 @@ describe("shellGuard", () => {
     const d = await g.shellGuard('echo "unterminated', { ...opts, env: { ...guardEnv, WINDOWS_GUARD_PARSER: "off" } });
     assert.equal(d, null);
   });
-  it("parser host found on PATH", parserOpts, async () => {
-    const errors = await g.parsePowerShell("Get-ChildItem | Select-Object -First 1", { ...opts, env: guardEnv });
-    assert.deepEqual(errors, []);
+  it("analyzeCommand returns allow for a clean command", async () => {
+    const d = await g.analyzeCommand("Get-ChildItem | Select-Object -First 1", { ...opts, env: guardEnv });
+    assert.deepEqual(d, { decision: "allow" });
   });
+  it("allow: > inside a single-quoted regex", () => expectGuard("Select-String -Path log.txt -Pattern '<[^>]+>'", false));
+  it("allow: => inside a double-quoted string", () => expectGuard('Write-Output "key => value"', false));
+  it("allow: comparison inside a here-string piped to python", () => expectGuard("@'\nif i >= 0:\n    print(i)\n'@ | python -", false));
+  it("allow: read-only open() in python -c", () => expectGuard("python -c \"import json; print(json.load(open('cfg.json'))['name'])\"", false));
+  it("allow: the word head inside a quoted argument", () => expectGuard('gh pr comment 12 --body "Rebased onto main (head ecba1d7)"', false));
+  it("allow: a Unix pipeline inside a wsl argument", () => expectGuard("wsl bash -lc 'ls -la | head -3'", false));
+  it("allow: conflict marker inside a string", () => expectGuard("Select-String -Path a.txt -Pattern '<<<<<<< HEAD'", false));
+  it("allow: a path ending in a backslash", () => expectGuard('cd "C:\\build\\"; Get-ChildItem', false));
+  it("deny: bash escape with a single quote elsewhere", () => expectGuard("python -c \"d = {'a': 1}; print(\\\"ok\\\")\"", true));
+  it("deny: multi-line python -c", () => expectGuard("python -c \"import os\nfor f in os.listdir('.'):\n    print(f)\"", true, "here-string"));
+  it("allow: multi-line python -c with # wg:allow", () => expectGuard("python -c \"import os\nprint(os.getcwd())\" # wg:allow", false));
+  it("deny: input redirection <", () => expectGuard("sort < names.txt", true, "Get-Content"));
+  it("deny: head inside a script block", () => expectGuard("Get-ChildItem | ForEach-Object { head $_ }", true, "Select-Object"));
+  it("deny: 2> to a file", () => expectGuard("dotnet build 2> errors.txt", true, "edit/create tool"));
+  it("allow: Set-Content with -Encoding:utf8", () => expectGuard("'x' | Set-Content -Encoding:utf8 out.txt", false));
 });
 
 // ---------------------------------------------------------------- utf8-gate

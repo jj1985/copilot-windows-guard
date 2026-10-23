@@ -63,8 +63,8 @@ after(() => {
 
 describe("replay: shell-guard over the corpus commands", () => {
   it("records a decision for every row", async () => {
-    // One pwsh process parses the whole corpus; shellGuard then hits the parser cache.
-    await g.parsePowerShellBatch(
+    // One pwsh process analyzes the whole corpus; shellGuard then hits the decision cache.
+    await g.analyzeCommandBatch(
       commands.map((r) => r.command),
       { env, log },
     );
