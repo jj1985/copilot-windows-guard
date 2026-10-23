@@ -4,7 +4,9 @@
 #     where ordinary command errors are visible. Output: {"additionalContext": "..."} with exit 0,
 #     which the CLI appends to the tool output the model sees on the same turn.
 #   - postToolUseFailure on all tools: edit-tool failures and other tool-level errors arrive here
-#     with an `error` field. Output: plain text with exit 2, which the CLI appends to the failure.
+#     with an `error` field. Output: {"additionalContext": "..."} with exit 0. The CLI hooks reference
+#     documents exit 2 plus plain text for this event, but on CLI 1.0.103 neither plain text nor JSON with
+#     exit 2 reaches the model; only JSON with exit 0 does (verified live 2026-10-23).
 # Recognizes quoting errors, bash-isms, 5.1 syntax, "No match found" and a few environment errors,
 # and always tells the model NOT to fall back to rewriting whole files. Unrecognized -> exit 0, silent.
 $ErrorActionPreference = 'Stop'
@@ -94,19 +96,29 @@ try {
         }
     }
     elseif ($tool -in @('edit', 'str_replace_editor', 'apply_patch', 'create')) {
-        if ($err -match 'No match|not found|did not match|could not find|does not exist in|Could not apply|failed to apply|does not appear|not unique|multiple|more than one|ambiguous|modified since|changed since') {
+        # The CLI passes short error strings here ("No match found", "Parent directory does not exist").
+        if ($err -match 'parent directory .*does not exist|directory does not exist') {
+            $dir = ''
+            if ($null -ne $ta -and $ta.PSObject -and $ta.PSObject.Properties['path'] -and $ta.path) {
+                try { $dir = Split-Path -Parent ([string]$ta.path) } catch { }
+            }
+            $target = '<directory>'
+            if ($dir) { $target = "'" + $dir + "'" }
+            $out += "The target directory does not exist. Create it first with one shell call: New-Item -ItemType Directory -Force $target ; then call the create tool again with the same content. Do not run the two calls in parallel, and do not write the file from the shell instead."
+        }
+        elseif ($err -match 'already exists') {
+            $out += 'The file already exists. View it with the view tool, then make the change with the edit tool. Never delete and re-create it with the create tool: that rewrites every line ending and loses unrelated content.'
+        }
+        elseif ($err -match 'No match|not found|did not match|could not find|does not exist in|Could not apply|failed to apply|does not appear|not unique|multiple|more than one|ambiguous|modified since|changed since') {
             $out += $EditRecovery
         }
     }
 
     if ($out.Count -gt 0) {
+        # Both events answer with {"additionalContext": "..."} and exit 0; see the header comment.
         $text = ($out -join "`n`n")
-        if ($mode -eq 'result') {
-            @{ additionalContext = $text } | ConvertTo-Json -Compress
-            exit 0
-        }
-        [Console]::Out.Write($text)
-        exit 2
+        @{ additionalContext = $text } | ConvertTo-Json -Compress
+        exit 0
     }
 } catch {
     Write-GuardLog "ERROR recovery-coach: $($_.Exception.Message)"

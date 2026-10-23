@@ -47,6 +47,7 @@ Plus two instruction components:
 - **Rules you can bypass.** Heuristic rules (file redirection, `echo -n`, the Unix-command check) accept `# wg:allow` anywhere in the command. The denial reason tells the agent so.
 - **Works under PowerShell 5.1 too.** The launcher prefers `pwsh` and falls back to `powershell.exe`; the scripts use no 7-only syntax.
 - **Payload read as raw bytes.** Hook input is decoded as UTF-8 directly from the stdin stream, so a host console code page cannot mangle it.
+- **Failure guidance as JSON with exit 0.** The CLI hooks reference says a `postToolUseFailure` command hook returns its guidance as plain text with exit code 2. On CLI 1.0.103 neither that form nor JSON with exit 2 reaches the model; only `{"additionalContext": ...}` with exit 0 does (verified live on 2026-10-23 with all three forms), so both engines answer that way. The CLI passes short error strings to this event (`No match found`, `Parent directory does not exist`), and the coach matches those.
 
 ## Extension mode (experimental)
 

@@ -552,7 +552,7 @@ const UNIX_MAP_COACH = {
 };
 
 // Shared by both coach modes. Returns the guidance text or null when the error is not recognized.
-export function advise(tool, err) {
+export function advise(tool, err, toolArgs = null) {
   const out = [];
   if (!err || /^Denied by preToolUse hook/.test(err)) return null; // the denial reason already carries the guidance
   if (SHELL_TOOLS.has(tool)) {
@@ -597,7 +597,19 @@ export function advise(tool, err) {
       out.push(QUOTING);
     }
   } else if (WRITE_TOOLS.has(tool)) {
-    if (
+    // The CLI passes short error strings here ("No match found", "Parent directory does not exist").
+    if (/parent directory .*does not exist|directory does not exist/i.test(err)) {
+      const p = toolArgs && typeof toolArgs === "object" ? toolArgs.path : undefined;
+      const dir = typeof p === "string" && p ? path.dirname(p) : "";
+      const target = dir ? `'${dir}'` : "<directory>";
+      out.push(
+        `The target directory does not exist. Create it first with one shell call: New-Item -ItemType Directory -Force ${target} ; then call the create tool again with the same content. Do not run the two calls in parallel, and do not write the file from the shell instead.`,
+      );
+    } else if (/already exists/i.test(err)) {
+      out.push(
+        "The file already exists. View it with the view tool, then make the change with the edit tool. Never delete and re-create it with the create tool: that rewrites every line ending and loses unrelated content.",
+      );
+    } else if (
       /No match|not found|did not match|could not find|does not exist in|Could not apply|failed to apply|does not appear|not unique|multiple|more than one|ambiguous|modified since|changed since/i.test(
         err,
       )
@@ -609,9 +621,9 @@ export function advise(tool, err) {
 }
 
 // postToolUseFailure: the CLI passes the tool's error string.
-export function coachFailure(tool, _toolArgs, error, { env = process.env, log = writeGuardLog } = {}) {
+export function coachFailure(tool, toolArgs, error, { env = process.env, log = writeGuardLog } = {}) {
   try {
-    return advise(String(tool ?? ""), String(error ?? ""));
+    return advise(String(tool ?? ""), String(error ?? ""), toolArgs);
   } catch (e) {
     log(`ERROR recovery-coach: ${e?.message ?? e}`, env);
     return null;
@@ -620,13 +632,13 @@ export function coachFailure(tool, _toolArgs, error, { env = process.env, log = 
 
 // postToolUse on the shell tool: a non-zero exit arrives as a SUCCESSFUL result whose text ends
 // with "<shellId: N completed with exit code M>", so this is where ordinary errors are visible.
-export function coachResult(tool, _toolArgs, text, { env = process.env, log = writeGuardLog } = {}) {
+export function coachResult(tool, toolArgs, text, { env = process.env, log = writeGuardLog } = {}) {
   try {
     const t = String(tool ?? "");
     if (!SHELL_TOOLS.has(t)) return null;
     const err = String(text ?? "");
     if (!SHELL_FAILURE_RE.test(err)) return null;
-    return advise(t, err);
+    return advise(t, err, toolArgs);
   } catch (e) {
     log(`ERROR recovery-coach: ${e?.message ?? e}`, env);
     return null;

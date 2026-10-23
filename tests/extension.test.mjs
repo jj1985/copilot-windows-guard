@@ -324,6 +324,14 @@ describe("coach (postToolUseFailure)", () => {
   it("unknown executable -> PATH advice", () => coach("powershell", { command: "frob" }, "frob: The term 'frob' is not recognized as a name of a cmdlet", true, "Get-Command frob"));
   it("edit No match found -> view again", () => coach("edit", { path: "a.txt", old_str: "x", new_str: "y" }, "No match found for old_str in a.txt", true, "view"));
   it("edit unrelated error -> silent", () => coach("edit", { path: "a.txt" }, "Something unrelated happened", false));
+  it("create into a missing directory -> New-Item for that directory, then create again", () => {
+    const f = path.join(work, "newdir", "sub", "f.txt");
+    coach("create", { path: f, file_text: "x" }, "Parent directory does not exist", true, `New-Item -ItemType Directory -Force '${path.dirname(f)}'`);
+  });
+  it("create into a missing directory without a path -> generic placeholder", () =>
+    coach("create", {}, "Parent directory does not exist", true, "-Force <directory>"));
+  it("create over an existing file -> view and edit, never delete", () =>
+    coach("create", { path: "a.txt", file_text: "x" }, "File already exists", true, "never delete"));
   it("view File not found -> silent", () => coach("view", { path: "a.txt" }, "File not found", false));
   it("denied by preToolUse -> silent", () =>
     coach("powershell", { command: 'echo "a' }, "Denied by preToolUse hook: PowerShell cannot parse this command: The string is missing the terminator. PowerShell quoting: ...", false));
@@ -450,6 +458,12 @@ describe("buildHooks (what extension.mjs registers)", () => {
     const out = await h.onSessionEnd({ sessionId: "end-1", timestamp: new Date(), workingDirectory: d, reason: "user_exit" });
     assert.equal(out, undefined);
     assert.equal(fs.existsSync(p), false);
+  });
+  it("onPostToolUseFailure coaches a create into a missing directory with the exact directory", async () => {
+    const f = path.join(d, "missing", "f.txt");
+    const out = await hooks.onPostToolUseFailure({ sessionId: "s", timestamp: new Date(), workingDirectory: d, toolName: "create", toolArgs: { path: f, file_text: "x" }, error: "Parent directory does not exist" });
+    assert.match(out.additionalContext, /New-Item -ItemType Directory -Force/);
+    assert.ok(out.additionalContext.includes(path.dirname(f)));
   });
   it("hooks fail open on garbage input", async () => {
     assert.equal(await hooks.onPreToolUse(null), undefined);

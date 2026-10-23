@@ -228,8 +228,12 @@ Test-Gate 'does-not-exist.txt' $false
 Write-Host "`n--- recovery-coach.ps1"
 function Test-Coach([string]$Tool, $ToolArgs, [string]$Err, [bool]$ExpectAdvice, [string]$Hint = '') {
     $r = Invoke-Hook 'recovery-coach.ps1' (@{ sessionId = 's'; timestamp = 1; cwd = $Work; toolName = $Tool; toolArgs = ($ToolArgs | ConvertTo-Json -Compress); error = $Err })
-    $hintOk = (-not $Hint) -or ($r.Out.IndexOf($Hint, [StringComparison]::OrdinalIgnoreCase) -ge 0)
-    if ($ExpectAdvice) { $ok = ($r.Code -eq 2) -and $r.Out -and $hintOk } else { $ok = ($r.Code -eq 0) -and (-not $r.Out) }
+    # postToolUseFailure answers with {"additionalContext": "..."} and exit 0: on CLI 1.0.103 that is the only
+    # form that reaches the model (plain text or JSON with exit 2 is logged but never delivered).
+    $ctx = ''
+    try { $ctx = [string](($r.Out | ConvertFrom-Json).additionalContext) } catch { }
+    $hintOk = (-not $Hint) -or ($ctx.IndexOf($Hint, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+    if ($ExpectAdvice) { $ok = ($r.Code -eq 0) -and $ctx -and $hintOk } else { $ok = ($r.Code -eq 0) -and (-not $r.Out) }
     Assert $ok "coach $Tool : $Err" "code=$($r.Code) out=$($r.Out)"
 }
 Test-Coach 'powershell' @{ command = 'head -5 x' } "head: The term 'head' is not recognized as a name of a cmdlet, function, script file, or executable program." $true 'Select-Object'
@@ -238,6 +242,8 @@ Test-Coach 'powershell' @{ command = 'a && b' } "The token '&&' is not a valid s
 Test-Coach 'powershell' @{ command = 'npm run x' } "npm ERR! missing script: x" $false
 Test-Coach 'edit' @{ path = 'a.txt'; old_str = 'x'; new_str = 'y' } "No match found for old_str in a.txt" $true 'view'
 Test-Coach 'edit' @{ path = 'a.txt' } "Something unrelated happened" $false
+Test-Coach 'create' @{ path = (Join-Path $Work 'newdir/sub/f.txt'); file_text = 'x' } "Parent directory does not exist" $true 'New-Item -ItemType Directory -Force'
+Test-Coach 'create' @{ path = (Join-Path $Work 'a.txt'); file_text = 'x' } "File already exists" $true 'never delete'
 Test-Coach 'view' @{ path = 'a.txt' } "File not found" $false
 Test-Coach 'powershell' @{ command = 'echo "a' } "Denied by preToolUse hook: PowerShell cannot parse this command: The string is missing the terminator. PowerShell quoting: ..." $false
 
@@ -305,7 +311,7 @@ try {
     $failPayload = @{ sessionId = 's'; timestamp = 1; cwd = $Work; toolName = 'edit'; toolArgs = '{"path":"a.txt"}'; error = 'No match found' } | ConvertTo-Json -Compress
     $out = ($failPayload | & $Shell -NoProfile -NonInteractive -Command $coach 2>&1 | ForEach-Object { "$_" }) -join "`n"
     $code = $LASTEXITCODE
-    Assert (($out -match 'view') -and $code -eq 2) 'launcher relays recovery-coach exit code 2 and text' "code=$code out=$out"
+    Assert (($out -match '"additionalContext"') -and ($out -match 'view') -and $code -eq 0) 'launcher relays recovery-coach additionalContext JSON with exit 0' "code=$code out=$out"
 } finally { $env:PLUGIN_ROOT = $savedRoot; $env:PATH = $savedPath; $env:WINDOWS_GUARD_MODE = $savedMode; $env:LOCALAPPDATA = $savedLocal }
 
 # ---------------------------------------------------------------- summary
