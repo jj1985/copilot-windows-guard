@@ -44,6 +44,57 @@ export function writeGuardLog(message, env = process.env) {
   }
 }
 
+// ------------------------------------------------------------------ liveness marker
+
+// In extension mode the hooks.json launchers must know whether the extension is really running
+// for this session; otherwise they run the PowerShell scripts as usual, so protection never
+// depends on the extension having loaded. The marker is <LOCALAPPDATA>/copilot-windows-guard/
+// active/<sessionId> holding the extension's PID: a location both processes can compute, because
+// the extension process does not receive the plugin's COPILOT_PLUGIN_DATA.
+export function getActiveMarkerDir(env = process.env) {
+  const base = env.LOCALAPPDATA || env.TEMP || os.tmpdir();
+  return path.join(base, "copilot-windows-guard", "active");
+}
+
+export function activeMarkerPath(sessionId, env = process.env) {
+  const safe = String(sessionId ?? "").replace(/[^A-Za-z0-9._-]/g, "_");
+  return path.join(getActiveMarkerDir(env), safe);
+}
+
+export function writeActiveMarker(sessionId, { env = process.env, pid = process.pid, log = writeGuardLog } = {}) {
+  if (!sessionId) return null;
+  try {
+    const dir = getActiveMarkerDir(env);
+    fs.mkdirSync(dir, { recursive: true });
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000; // sessions that ended without cleanup
+    for (const n of fs.readdirSync(dir)) {
+      try {
+        const old = path.join(dir, n);
+        if (fs.statSync(old).mtimeMs < cutoff) fs.unlinkSync(old);
+      } catch {
+        // best effort
+      }
+    }
+    const p = activeMarkerPath(sessionId, env);
+    fs.writeFileSync(p, `${pid}
+`, "utf8");
+    return p;
+  } catch (e) {
+    log(`ERROR marker: ${e?.message ?? e}`, env);
+    return null;
+  }
+}
+
+export function removeActiveMarker(sessionId, { env = process.env } = {}) {
+  if (!sessionId) return false;
+  try {
+    fs.unlinkSync(activeMarkerPath(sessionId, env));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ------------------------------------------------------------------ process helpers
 
 function run(file, args, { env = process.env, timeout = 5000 } = {}) {
@@ -615,7 +666,7 @@ function safeJson(value, limit = 4000) {
   }
 }
 
-// The SDK session hooks (onSessionStart, onPreToolUse, onPostToolUse, onPostToolUseFailure)
+// The SDK session hooks (onSessionStart, onSessionEnd, onPreToolUse, onPostToolUse, onPostToolUseFailure)
 // that extension.mjs registers with joinSession. Returning undefined means "no change", which
 // for onPreToolUse leaves the CLI's normal permission flow untouched.
 export function buildHooks({ rulesDir, env = process.env, log = writeGuardLog } = {}) {
@@ -637,6 +688,11 @@ export function buildHooks({ rulesDir, env = process.env, log = writeGuardLog } 
         if (!text) return undefined;
         if (debug) log(`INJECTED rules (${text.length} chars)`, env);
         return { additionalContext: text };
+      }),
+    onSessionEnd: (input) =>
+      protect("sessionEnd", input, () => {
+        removeActiveMarker(input?.sessionId, { env });
+        return undefined;
       }),
     onPreToolUse: (input) =>
       protect("preToolUse", input, async () => {

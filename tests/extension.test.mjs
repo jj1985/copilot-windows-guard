@@ -30,9 +30,18 @@ const haveGit = Boolean(g.findExecutable("git"));
 const pwsh = g.findExecutable("pwsh") ?? g.findExecutable("powershell");
 // Guard tests run with a minimal PATH, so a Git-for-Windows grep/head/sed on the real PATH cannot
 // turn an expected deny into an allow. pwsh stays reachable for the parser check.
+let pwshDir = pwsh ? path.dirname(pwsh) : null;
+if (pwsh && !isWin) {
+  // On Linux and macOS the directory that holds pwsh also holds head, grep and sed, so expose
+  // pwsh alone through a private bin directory.
+  const bin = path.join(work, "bin");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.symlinkSync(pwsh, path.join(bin, path.basename(pwsh)));
+  pwshDir = bin;
+}
 const minPath = [
   ...(isWin ? [path.join(process.env.SystemRoot ?? "C:\\Windows", "System32"), process.env.SystemRoot ?? "C:\\Windows"] : []),
-  pwsh ? path.dirname(pwsh) : null,
+  pwshDir,
 ]
   .filter(Boolean)
   .join(path.delimiter);
@@ -350,6 +359,30 @@ describe("loadRules", () => {
   it("missing directory -> null", () => assert.equal(g.loadRules(path.join(work, "no-rules")), null));
 });
 
+// ---------------------------------------------------------------- liveness marker
+describe("active marker (what the hooks.json launchers check in extension mode)", () => {
+  const home = newDir("home");
+  const env = { ...process.env, LOCALAPPDATA: home };
+
+  it("writes <LOCALAPPDATA>/copilot-windows-guard/active/<sessionId> holding the PID", () => {
+    const p = g.writeActiveMarker("abc-123", { env, pid: 4242, log });
+    assert.equal(p, path.join(home, "copilot-windows-guard", "active", "abc-123"));
+    assert.equal(fs.readFileSync(p, "utf8"), "4242\n");
+  });
+  it("sanitizes the session id used as a file name", () => {
+    const p = g.writeActiveMarker("../x/y", { env, pid: 1, log });
+    assert.equal(path.basename(p), ".._x_y");
+    assert.equal(path.dirname(p), path.join(home, "copilot-windows-guard", "active"));
+  });
+  it("removes the marker and tolerates a missing one", () => {
+    assert.equal(g.removeActiveMarker("abc-123", { env }), true);
+    assert.equal(fs.existsSync(path.join(home, "copilot-windows-guard", "active", "abc-123")), false);
+    assert.equal(g.removeActiveMarker("abc-123", { env }), false);
+    assert.equal(g.removeActiveMarker(undefined, { env }), false);
+  });
+  it("no session id -> no marker", () => assert.equal(g.writeActiveMarker("", { env, log }), null));
+});
+
 // ---------------------------------------------------------------- session hook wiring
 describe("buildHooks (what extension.mjs registers)", () => {
   const hooks = g.buildHooks({ rulesDir, env: guardEnv, log });
@@ -408,6 +441,15 @@ describe("buildHooks (what extension.mjs registers)", () => {
   it("onPostToolUseFailure coaches an edit mismatch", async () => {
     const out = await hooks.onPostToolUseFailure({ sessionId: "s", timestamp: new Date(), workingDirectory: d, toolName: "edit", toolArgs: { path: "a.txt" }, error: "No match found" });
     assert.match(out.additionalContext, /view tool/);
+  });
+  it("onSessionEnd removes the session's marker", async () => {
+    const home = newDir("home2");
+    const h = g.buildHooks({ rulesDir, env: { ...guardEnv, LOCALAPPDATA: home }, log });
+    const p = g.writeActiveMarker("end-1", { env: { LOCALAPPDATA: home }, pid: 1, log });
+    assert.ok(fs.existsSync(p));
+    const out = await h.onSessionEnd({ sessionId: "end-1", timestamp: new Date(), workingDirectory: d, reason: "user_exit" });
+    assert.equal(out, undefined);
+    assert.equal(fs.existsSync(p), false);
   });
   it("hooks fail open on garbage input", async () => {
     assert.equal(await hooks.onPreToolUse(null), undefined);

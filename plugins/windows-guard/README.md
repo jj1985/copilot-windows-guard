@@ -16,7 +16,7 @@ $env:WINDOWS_GUARD_MODE = 'extension'
 copilot --experimental
 ```
 
-Approve the extension and confirm `windows-guard: extension mode active` in the timeline. Prompt mode also needs `GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS=true`. Unset `WINDOWS_GUARD_MODE` and restart the session to restore PowerShell hooks; the switch bypasses the hooks even if the extension fails to load or is disabled.
+Approve the extension and confirm `windows-guard: extension mode active` in the timeline. Prompt mode also needs `GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS=true`. Unset `WINDOWS_GUARD_MODE` and restart the session to return to the PowerShell hooks. If the extension is disabled, not approved or fails to load, the launchers find no liveness marker and run the PowerShell scripts anyway.
 
 See the [repository README](../../README.md) for the full description, installation, configuration and the research behind it.
 

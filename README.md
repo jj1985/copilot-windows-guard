@@ -57,11 +57,16 @@ It is **off by default**. One switch selects the engine, so nothing ever runs tw
 | `WINDOWS_GUARD_MODE` | PowerShell hooks | Extension |
 |---|---|---|
 | unset (default) | do all the work | joins the session idle: registers no hooks, writes one line to the log |
-| `extension` | every launcher exits 0 before starting its script | does all the work |
+| `extension`, extension running | every launcher exits 0 before starting its script | does all the work |
+| `extension`, extension not running (disabled, not approved, failed to load, non-experimental session) | do all the work | n/a |
+
+How the launchers know: when the extension joins a session in extension mode it writes `%LOCALAPPDATA%\copilot-windows-guard\active\<sessionId>` containing its process id, and removes the file when the session ends or the process exits. A launcher in extension mode reads the session id from its payload and exits early only if that file exists and the process is alive; otherwise it runs its script. A stale file from a crashed extension cannot disable the hooks, because its process id is dead.
+
+Verified on 2026-10-23 with CLI 1.0.103: with the variable set but experimental features off (so the extension never loads), a created file still came out as 14 LF bytes, and the plugin's own log shows the PowerShell normalizer doing it; with the extension running, the marker file existed for the session, the PowerShell log stayed silent, and the marker was gone after exit.
 
 ### Enable it
 
-Install the plugin from the `experimental` branch using the [installation instructions](#installation) first. **Do not set `WINDOWS_GUARD_MODE=extension` unless extensions are enabled and this plugin's extension is approved and running:** the variable disables the PowerShell hooks even if the extension cannot load.
+Install the plugin from the `experimental` branch using the [installation instructions](#installation) first. Setting the variable is safe even when the extension cannot run: without a liveness marker the launchers run their PowerShell scripts as usual.
 
 ```powershell
 $env:WINDOWS_GUARD_MODE = 'extension'
@@ -73,7 +78,7 @@ copilot --experimental
 - **Approve the extension.** Interactive sessions ask once per extension and directory (per the CLI docs); `--allow-all-tools`, or `--allow-tool` with the `extension-permission-access(...)` pattern, skips the prompt. The prompt-mode runs below used `--allow-all-tools` and were not asked.
 - **Prompt mode needs one more variable.** `copilot -p ...` does not load extensions unless `GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS=true` is set.
 - **No separate Node.js or SDK installation.** Once this branch's plugin is installed, the CLI runs the extension with the Node.js runtime inside `copilot.exe` and resolves `@github/copilot-sdk/extension` itself; the log shows `node v24.22.1 at ...\copilot.exe`.
-- **Confirm it is active.** The session timeline shows `windows-guard: extension mode active`, `/extensions manage` lists `windows-guard` as running, and `windows-guard.log` gains `[ext]` lines. Each extension also writes its own log under `~/.copilot/logs/extensions/`.
+- **Confirm it is active.** The session timeline shows `windows-guard: extension mode active`, `/extensions manage` lists `windows-guard` as running, and `windows-guard.log` gains `[ext]` lines, and `%LOCALAPPDATA%\copilot-windows-guard\active\` holds a file named after the session id. Each extension also writes its own log under `~/.copilot/logs/extensions/`.
 
 ### What you gain and what you pay
 
@@ -85,20 +90,20 @@ Median of 5 on the same machine (CLI 1.0.103, PowerShell 7.5):
 | shell command, denied by a rule | 566 ms | < 1 ms |
 | edit or create outside a repository | 617 ms | 32 ms (one `git rev-parse`) |
 | edit of a non-UTF-8 file | ~560 ms | < 1 ms |
-| launcher that exits at once | n/a | ~200 ms per hooked event, still paid |
+| launcher that exits at once | n/a | ~250 ms per hooked event (process start plus the marker check), still paid |
 
 The last row is the catch. `hooks.json` cannot be conditional, so the CLI still starts each PowerShell launcher, which reads the switch and exits. Extension mode removes one of the two processes and all of the work from the hook path; the launcher itself can only go away with a CLI feature (or by removing the hooks, which would leave non-experimental sessions unprotected).
 
 Trade-offs:
 
 - **Experimental mode is required**, and the extension API is explicitly subject to change.
-- **An approval prompt for every user.** A plugin-shipped extension is discovered for everyone who runs with `--experimental`, including in the default mode where it stays idle. `/extensions mode` set to Disabled turns extensions off entirely; unset `WINDOWS_GUARD_MODE` first so the PowerShell hooks resume protection.
+- **An approval prompt for every user.** A plugin-shipped extension is discovered for everyone who runs with `--experimental`, including in the default mode where it stays idle. `/extensions mode` set to Disabled turns extensions off entirely; the PowerShell hooks take over on their own because no liveness marker is written.
 - **Parser check still spawns PowerShell**, but only after every cheap rule passed, once per distinct command text. `WINDOWS_GUARD_PARSER=off` removes it; unterminated strings and bash `for` / `[ -f x ]` syntax are then caught only after execution, by the coach.
 - **Tool failures.** The SDK documents that extension hooks see only `"failure"` results, not `"rejected"`, `"denied"` or `"timeout"`, and copilot-sdk#1220 tracked failures not reaching extensions at all. Verified on CLI 1.0.103: `onPostToolUseFailure` fires for an edit-tool `No match found` and the model receives the recovery steps. Other failure kinds were not tested.
 - **`-p` automation** needs the extra variable, and the extension's one-line startup message appears in prompt-mode output.
 - **Windows only.** On macOS and Linux the extension joins the session and does nothing, like the hooks.
 
-To return to the PowerShell engine, run `Remove-Item Env:WINDOWS_GUARD_MODE -ErrorAction SilentlyContinue` and start a new session. Also remove any persistent setting of that variable. Do this before disabling experimental features or declining the extension's approval; otherwise the launchers still skip protection.
+To return to the PowerShell engine, unset `WINDOWS_GUARD_MODE` (and any persistent setting of it) and start a new session. Disabling experimental features or declining the extension's approval also falls back to the hooks on its own, at the normal hook latency, because no liveness marker exists then.
 
 ### When to prefer the PowerShell hooks
 
@@ -129,7 +134,7 @@ copilot plugin marketplace add jj1985/copilot-windows-guard#experimental
 copilot plugin install windows-guard@copilot-windows-guard
 ```
 
-The marketplace's relative plugin source (`./plugins/windows-guard`) comes from the same branch checkout. The names `copilot-windows-guard` and `windows-guard` are unchanged; stable and experimental installs are alternatives, not side-by-side copies.
+The marketplace's relative plugin source (`./plugins/windows-guard`) comes from the same branch checkout (verified on CLI 1.0.103: the installed plugin contains this branch's `com.github.copilot/extensions/`). The names `copilot-windows-guard` and `windows-guard` are unchanged; stable and experimental installs are alternatives, not side-by-side copies.
 
 ### Switching an existing installation
 
@@ -149,24 +154,18 @@ copilot plugin install windows-guard@copilot-windows-guard
 
 To reinstall stable instead, unset `WINDOWS_GUARD_MODE`, repeat these steps with `jj1985/copilot-windows-guard` (no `#experimental`), and start a new session. Remove any repository-level `ref` pin below as well.
 
-### Directly from a local checkout of experimental
+### Directly from the repository
 
-In a local clone of this repository:
+Not for this branch. `copilot plugin install owner/repo:path` always fetches the default branch and accepts no ref (verified on CLI 1.0.103: `#experimental` and `@experimental` suffixes are rejected), and `copilot plugin install` does not accept a local path. Use the marketplace pin above, the team setting below, or a local clone for one session.
+
+### For one session, from a local clone of experimental
 
 ```powershell
 git switch experimental
-copilot plugin install .\plugins\windows-guard
-```
-
-This avoids an unpinned remote subdirectory install, which would fetch the default branch. Reinstall after pulling changes because local plugin installs are cached.
-
-### For one session, from that experimental checkout
-
-```powershell
 copilot --plugin-dir .\plugins\windows-guard
 ```
 
-This uses the PowerShell engine. For the extension engine, set `WINDOWS_GUARD_MODE=extension` and add `--experimental` as shown above. Do not load an installed copy alongside the local copy.
+This uses the PowerShell engine. For the extension engine, set `WINDOWS_GUARD_MODE=extension` and add `--experimental` as shown above. If a marketplace copy is installed as well, set `COPILOT_PLUGIN_DIR_ONLY=true` so only the local copy loads.
 
 ### For a team repository
 
@@ -209,7 +208,7 @@ Environment variables shared by both engines. PowerShell hooks read them per eve
 | `WINDOWS_GUARD_CRLF_EXT` | `.bat .cmd .sln .vcproj .vcxproj` | Extensions that always get CRLF when nothing else decides. Comma, semicolon or space separated. |
 | `WINDOWS_GUARD_KEEP_BOM_EXT` | (empty) | Extensions whose existing BOM is preserved, for example `.ps1` if non-ASCII scripts must run under Windows PowerShell 5.1. |
 | `WINDOWS_GUARD_DEBUG` | (unset) | Log every raw hook payload. |
-| `WINDOWS_GUARD_MODE` | (unset) | `extension` makes every `hooks.json` launcher exit immediately, even if the extension is unavailable. Requires the experimental branch's plugin, enabled experimental features and an approved, running extension. Unset to restore PowerShell hooks. See [Extension mode](#extension-mode-experimental). |
+| `WINDOWS_GUARD_MODE` | (unset) | `extension` makes every `hooks.json` launcher exit immediately while the extension is running for the session (liveness marker present and its process alive); otherwise the PowerShell scripts run as usual. Needs the experimental branch's plugin and experimental features on to gain anything. See [Extension mode](#extension-mode-experimental). |
 | `WINDOWS_GUARD_PARSER` | (unset) | `off` skips the PowerShell parser check in extension mode (the hooks always run it). |
 
 The most reliable way to express a repository's line-ending policy is `.gitattributes`, which the normalizer treats as the single source of truth:

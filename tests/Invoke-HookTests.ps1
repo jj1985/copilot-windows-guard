@@ -270,7 +270,7 @@ Write-Host "`n--- hooks.json inline launcher"
 $hooks = Get-Content -Raw (Join-Path $PluginDir 'com.github.copilot\hooks\hooks.json') | ConvertFrom-Json
 $launcher = $hooks.hooks.preToolUse[0].powershell
 $payload = @{ sessionId = 's'; timestamp = 1; cwd = $Work; toolName = 'powershell'; toolArgs = (@{ command = 'head -3 x' } | ConvertTo-Json -Compress) } | ConvertTo-Json -Compress
-$savedRoot = $env:PLUGIN_ROOT; $savedPath = $env:PATH; $savedMode = $env:WINDOWS_GUARD_MODE
+$savedRoot = $env:PLUGIN_ROOT; $savedPath = $env:PATH; $savedMode = $env:WINDOWS_GUARD_MODE; $savedLocal = $env:LOCALAPPDATA
 try {
     $env:PLUGIN_ROOT = $PluginDir; $env:PATH = $MinPath
     $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -281,20 +281,32 @@ try {
     $out = ($payload | & $Shell -NoProfile -NonInteractive -Command $launcher 2>&1 | ForEach-Object { "$_" }) -join "`n"
     $code = $LASTEXITCODE
     Assert ((-not $out) -and $code -eq 0) 'launcher without PLUGIN_ROOT exits 0 silently (fail-open)' "code=$code out=$out"
-    # Opt-out switch: with WINDOWS_GUARD_MODE=extension the extension owns the work and every
-    # launcher must exit 0 silently without starting the script, even with PLUGIN_ROOT set.
-    $env:PLUGIN_ROOT = $PluginDir; $env:WINDOWS_GUARD_MODE = 'extension'
+    # Opt-out switch: with WINDOWS_GUARD_MODE=extension the launcher reads the payload's sessionId
+    # and looks for %LOCALAPPDATA%\copilot-windows-guard\active\<sessionId>, written by the extension
+    # and holding its PID. Live PID -> exit 0 silently. Missing marker or dead PID -> the script runs,
+    # so protection never depends on the extension actually having loaded.
+    $env:PLUGIN_ROOT = $PluginDir; $env:WINDOWS_GUARD_MODE = 'extension'; $env:LOCALAPPDATA = $Work
+    $markerDir = Join-Path $Work 'copilot-windows-guard\active'; New-Item -ItemType Directory -Force -Path $markerDir | Out-Null
+    $marker = Join-Path $markerDir 's'
     $out = ($payload | & $Shell -NoProfile -NonInteractive -Command $launcher 2>&1 | ForEach-Object { "$_" }) -join "`n"
     $code = $LASTEXITCODE
-    Assert ((-not $out) -and $code -eq 0) 'launcher with WINDOWS_GUARD_MODE=extension exits 0 silently (extension owns the work)' "code=$code out=$out"
-    $env:WINDOWS_GUARD_MODE = $null
+    Assert (($out -match '"deny"') -and $code -eq 0) 'launcher with WINDOWS_GUARD_MODE=extension but no extension marker falls back to the script' "code=$code out=$out"
+    [IO.File]::WriteAllText($marker, "$PID`n")
+    $out = ($payload | & $Shell -NoProfile -NonInteractive -Command $launcher 2>&1 | ForEach-Object { "$_" }) -join "`n"
+    $code = $LASTEXITCODE
+    Assert ((-not $out) -and $code -eq 0) 'launcher with WINDOWS_GUARD_MODE=extension and a live extension marker exits 0 silently' "code=$code out=$out"
+    [IO.File]::WriteAllText($marker, "999999`n")
+    $out = ($payload | & $Shell -NoProfile -NonInteractive -Command $launcher 2>&1 | ForEach-Object { "$_" }) -join "`n"
+    $code = $LASTEXITCODE
+    Assert (($out -match '"deny"') -and $code -eq 0) 'launcher with WINDOWS_GUARD_MODE=extension and a dead-PID marker falls back to the script' "code=$code out=$out"
+    $env:WINDOWS_GUARD_MODE = $null; $env:LOCALAPPDATA = $savedLocal
     $env:PLUGIN_ROOT = $PluginDir
     $coach = $hooks.hooks.postToolUseFailure[0].powershell
     $failPayload = @{ sessionId = 's'; timestamp = 1; cwd = $Work; toolName = 'edit'; toolArgs = '{"path":"a.txt"}'; error = 'No match found' } | ConvertTo-Json -Compress
     $out = ($failPayload | & $Shell -NoProfile -NonInteractive -Command $coach 2>&1 | ForEach-Object { "$_" }) -join "`n"
     $code = $LASTEXITCODE
     Assert (($out -match 'view') -and $code -eq 2) 'launcher relays recovery-coach exit code 2 and text' "code=$code out=$out"
-} finally { $env:PLUGIN_ROOT = $savedRoot; $env:PATH = $savedPath; $env:WINDOWS_GUARD_MODE = $savedMode }
+} finally { $env:PLUGIN_ROOT = $savedRoot; $env:PATH = $savedPath; $env:WINDOWS_GUARD_MODE = $savedMode; $env:LOCALAPPDATA = $savedLocal }
 
 # ---------------------------------------------------------------- summary
 Write-Host "`n$($script:Pass) passed, $($script:Fail) failed"
