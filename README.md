@@ -7,6 +7,8 @@ copilot plugin marketplace add jj1985/copilot-windows-guard
 copilot plugin install windows-guard@copilot-windows-guard
 ```
 
+The PowerShell hooks work with no further setup. An in-process extension engine that does the same work with less latency is opt-in; see [Extension mode](#extension-mode-experimental).
+
 ## The problem
 
 On Windows, Copilot CLI's trouble with files comes from three separate layers, and only one of them responds to prompting:
@@ -23,12 +25,14 @@ Hooks are the only user-controlled layer that sits between the model and the fil
 
 | Hook | Event | Effect |
 |---|---|---|
-| `normalize-eol.ps1` | `postToolUse` on `edit`, `create`, `str_replace_editor`, `apply_patch` | Rewrites the file to the intended line ending and removes the BOM, milliseconds after the tool wrote it. Intended ending: `.gitattributes eol=` → `core.autocrlf=true` → what the git index already holds → `.bat`/`.cmd`/`.sln` list → LF. Respects `-text`. |
-| `shell-guard.ps1` | `preToolUse` on the shell tool | Runs the command through PowerShell's own parser and denies anything that does not parse (unterminated strings, bash `for`/`[ ]`, stray `\"`), with the exact error. Also denies heredocs, Unix commands that are not installed (`grep`, `head`, `sed`, ...), `2>/dev/null`, `VAR=x cmd`, cmd.exe switches, file redirection, `Set-Content`/`Out-File` without `-Encoding utf8NoBOM`, inline `python -c`/`node -e` file writes, and `$home =`. Every denial reason contains the PowerShell form to use instead. |
+| `normalize-eol.ps1` | `postToolUse` on `edit`, `create`, `str_replace_editor`, `apply_patch` | Rewrites the file to the intended line ending and removes the BOM, milliseconds after the tool wrote it. Intended ending: `.gitattributes eol=` → `core.autocrlf=true` → what the git index already holds → `.bat`/`.cmd`/`.sln` list → LF. Respects `-text`. Adds a missing final newline when `.editorconfig` says `insert_final_newline = true` for the file, or when `WINDOWS_GUARD_FINAL_NEWLINE=1`. |
+| `shell-guard.ps1` | `preToolUse` on the shell tool | Decides on PowerShell's own AST (`scripts/analyze-command.ps1`, shared with the extension): denies heredocs and `<` input redirection, Unix commands that are not installed (`grep`, `head`, `sed`, ...), `2>/dev/null`, `VAR=x cmd`, cmd.exe switches, real file redirects, `Set-Content`/`Out-File` without `-Encoding utf8NoBOM`, inline `python -c`/`node -e` file writes and multi-line one-liners, bash `\"` escapes, `$home =`, a relative `[IO.File]`/`[IO.Directory]` path after `cd` (.NET resolves it against the session's start folder), a first-statement `cd` to a folder that does not exist (the rest of the line would run in the old folder with exit 0), `2>&1` piped into `ConvertFrom-Json`/`jq`/`json.load`, and anything that does not parse, with the exact error. A `>` inside a string or a here-string, or `head` inside a quoted argument, is content and passes. Every denial reason contains the PowerShell form to use instead. |
 | `utf8-gate.ps1` | `preToolUse` on `edit`, `str_replace_editor`, `apply_patch` | Refuses to edit a file that is Windows-1252, UTF-16 or otherwise not UTF-8, because the edit tool would corrupt it irreversibly, and tells the agent to ask you first. |
-| `recovery-coach.ps1` | `postToolUse` on the shell tool, and `postToolUseFailure` on all tools | When a command exits non-zero or an edit fails, recognizes the cause (quoting, bash-ism, 5.1 syntax, "No match found", locked file, execution policy) and appends concrete recovery steps to what the agent sees. The edit guidance explicitly forbids rewriting the whole file as a workaround. (Copilot CLI reports a failed shell command as a successful tool call with the exit code in the text, which is why the shell path uses `postToolUse`.) |
+| `recovery-coach.ps1` | `postToolUse` on the shell tool, and `postToolUseFailure` on all tools | When a command exits non-zero or an edit fails, recognizes the cause (quoting, bash-ism, 5.1 syntax, "No match found", a missing directory or an existing file on create, a failed `cd` that let the rest of the line run, a JSON parse failure caused by `2>&1`, cp1252 `UnicodeEncodeError`, a missing Python package or runner (`uv run --with`), `git rev-parse` with two refs, an unexpanded wildcard, locked file, execution policy) and tells the agent when a non-zero exit is benign (a search with no match, `gh pr checks` pending, a suppressed `-ErrorAction SilentlyContinue` error). Parse-error advice fires only on a non-zero exit with PowerShell's own error layout, so error words inside a search result stay silent and appends concrete recovery steps to what the agent sees. The edit guidance explicitly forbids rewriting the whole file as a workaround. (Copilot CLI reports a failed shell command as a successful tool call with the exit code in the text, which is why the shell path uses `postToolUse`.) |
 
-| `inject-rules.ps1` | `sessionStart` | Injects the rules file below as session context. Copilot CLI 1.0.101 does not load a plugin's `com.github.copilot/rules/` as an instruction source (`copilot instruction list` shows nothing and the model reports the rules as absent), so the hook delivers them deterministically. |
+| `inject-rules.ps1` | `sessionStart` | Injects the rules file below as session context. Copilot CLI 1.0.101 does not load a plugin's `com.github.copilot/rules/` as an instruction source (`copilot instruction list` shows nothing and the model reports the rules as absent), so the hook delivers them deterministically. Adds a note when `PYTHONUTF8` is unset, the cause of cp1252 `UnicodeEncodeError` in Python output. |
+
+The same five behaviors also exist as a Copilot CLI extension (`com.github.copilot/extensions/windows-guard/`) for sessions that run with experimental features on; see [Extension mode](#extension-mode-experimental).
 
 Plus two instruction components:
 
@@ -41,13 +45,76 @@ Plus two instruction components:
 - **Rules you can bypass.** Heuristic rules (file redirection, `echo -n`, the Unix-command check) accept `# wg:allow` anywhere in the command. The denial reason tells the agent so.
 - **Works under PowerShell 5.1 too.** The launcher prefers `pwsh` and falls back to `powershell.exe`; the scripts use no 7-only syntax.
 - **Payload read as raw bytes.** Hook input is decoded as UTF-8 directly from the stdin stream, so a host console code page cannot mangle it.
+- **One analyzer for both engines.** The shell-guard rules are evaluated on PowerShell's AST and tokens in `scripts/analyze-command.ps1`, dot-sourced by the hook and run by the extension in one PowerShell process per distinct command. The regexes over raw text that denied a `>` inside a quoted pattern or `head` inside a quoted argument are gone, and the replay corpus's parity check keeps the two engines identical.
+- **Failure guidance as JSON with exit 0.** The CLI hooks reference says a `postToolUseFailure` command hook returns its guidance as plain text with exit code 2. On CLI 1.0.103 neither that form nor JSON with exit 2 reaches the model; only `{"additionalContext": ...}` with exit 0 does (verified live on 2026-10-23 with all three forms), so both engines answer that way. The CLI passes short error strings to this event (`No match found`, `Parent directory does not exist`), and the coach matches those.
+
+## Extension mode (experimental)
+
+Each command hook above costs two PowerShell processes per tool call (the inline launcher in `hooks.json`, then the script it starts): about 0.6 s per hooked event on a current laptop. Copilot CLI's experimental **extensions** receive the same hook events inside one long-lived Node.js process, so the plugin also ships its logic as an extension. `com.github.copilot/extensions/windows-guard/extension.mjs` registers `onSessionStart`, `onPreToolUse`, `onPostToolUse` and `onPostToolUseFailure` callbacks, and the JavaScript behind them (`guard.mjs`) mirrors the PowerShell scripts rule for rule and message for message.
+
+It is **off by default**. One switch selects the engine, so nothing ever runs twice:
+
+| `WINDOWS_GUARD_MODE` | PowerShell hooks | Extension |
+|---|---|---|
+| unset (default) | do all the work | joins the session idle: registers no hooks, writes one line to the log |
+| `extension`, extension running | every launcher exits 0 before starting its script | does all the work |
+| `extension`, extension not running (disabled, not approved, failed to load, non-experimental session) | do all the work | n/a |
+
+How the launchers know: when the extension joins a session in extension mode it writes `%LOCALAPPDATA%\copilot-windows-guard\active\<sessionId>` containing its process id, and removes the file when the session ends or the process exits. A launcher in extension mode reads the session id from its payload and exits early only if that file exists and the process is alive; otherwise it runs its script. A stale file from a crashed extension cannot disable the hooks, because its process id is dead.
+
+Verified on 2026-10-23 with CLI 1.0.103: with the variable set but experimental features off (so the extension never loads), a created file still came out as 14 LF bytes, and the plugin's own log shows the PowerShell normalizer doing it; with the extension running, the marker file existed for the session, the PowerShell log stayed silent, and the marker was gone after exit. The same checks pass against the plugin installed through the marketplace: hooks engine, and extension engine for create, deny and coach.
+
+### Enable it
+
+Install the plugin first ([installation](#installation)). Setting the variable is safe even when the extension cannot run: without a liveness marker the launchers run their PowerShell scripts as usual.
+
+```powershell
+$env:WINDOWS_GUARD_MODE = 'extension'
+copilot --experimental
+```
+
+`"experimental": true` in `~/.copilot/settings.json` replaces the flag. Then:
+
+- **Approve the extension.** Interactive sessions ask once per extension and directory (per the CLI docs); `--allow-all-tools`, or `--allow-tool` with the `extension-permission-access(...)` pattern, skips the prompt. The prompt-mode runs below used `--allow-all-tools` and were not asked.
+- **Prompt mode works without extra settings.** `copilot -p ...` loaded the installed plugin's extension as is (verified with the marketplace install on 1.0.103). `GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS=true` is the CLI's switch for repository extensions under `.github/extensions/`, which prompt mode otherwise skips; it is harmless here.
+- **No separate Node.js or SDK installation.** The CLI runs the extension with the Node.js runtime inside `copilot.exe` and resolves `@github/copilot-sdk/extension` itself; the log shows `node v24.22.1 at ...\copilot.exe`.
+- **Confirm it is active.** The session timeline shows `windows-guard: extension mode active`, `/extensions manage` lists `windows-guard` as running, and `windows-guard.log` gains `[ext]` lines, and `%LOCALAPPDATA%\copilot-windows-guard\active\` holds a file named after the session id. Each extension also writes its own log under `~/.copilot/logs/extensions/`.
+
+### What you gain and what you pay
+
+Median of 5 on the same machine (CLI 1.0.103, PowerShell 7.5):
+
+| Hooked event | PowerShell hooks | Extension mode |
+|---|---|---|
+| shell command, allowed | 560 ms | 280 ms (one PowerShell process runs the AST analyzer; 0 ms when the same command text repeats) |
+| shell command, denied by a rule | 566 ms | 280 ms (same analyzer run) |
+| edit or create outside a repository | 617 ms | 32 ms (one `git rev-parse`) |
+| edit of a non-UTF-8 file | ~560 ms | < 1 ms |
+| launcher that exits at once | n/a | ~250 ms per hooked event (process start plus the marker check), still paid |
+
+The last row is the catch. `hooks.json` cannot be conditional, so the CLI still starts each PowerShell launcher, which reads the switch and exits. Extension mode removes one of the two processes and all of the work from the hook path; the launcher itself can only go away with a CLI feature (or by removing the hooks, which would leave non-experimental sessions unprotected).
+
+Trade-offs:
+
+- **Experimental mode is required**, and the extension API is explicitly subject to change.
+- **An approval prompt for every user.** A plugin-shipped extension is discovered for everyone who runs with `--experimental`, including in the default mode where it stays idle. `/extensions mode` set to Disabled turns extensions off entirely; the PowerShell hooks take over on their own because no liveness marker is written.
+- **The analyzer runs in a PowerShell process** per distinct shell command (about 0.2 s, cached per command text), because the rules are evaluated on PowerShell's AST; both engines share that script, so there is nothing to keep in sync. `WINDOWS_GUARD_PARSER=off` only stops denials for commands that fail to parse.
+- **Tool failures.** The SDK documents that extension hooks see only `"failure"` results, not `"rejected"`, `"denied"` or `"timeout"`, and copilot-sdk#1220 tracked failures not reaching extensions at all. Verified on CLI 1.0.103: `onPostToolUseFailure` fires for an edit-tool `No match found` and the model receives the recovery steps. Other failure kinds were not tested.
+- **`-p` automation** shows the extension's one-line startup message in the output.
+- **Windows only.** On macOS and Linux the extension joins the session and does nothing, like the hooks.
+
+To return to the PowerShell engine, unset `WINDOWS_GUARD_MODE` (and any persistent setting of it) and start a new session. Disabling experimental features or declining the extension's approval also falls back to the hooks on its own, at the normal hook latency, because no liveness marker exists then.
+
+### When to prefer the PowerShell hooks
+
+Keep the default unless the per-call latency bothers you. The hooks need no experimental flag, no approval prompt and no extra variable in `-p` mode, they run under Windows PowerShell 5.1 as well as 7, and both engines enforce the same rules with the same messages and are tested against the same cases (`tests/Invoke-HookTests.ps1` and `tests/extension.test.mjs`). Switch to extension mode when you already run with experimental features on and want hooked tool calls to cost tens of milliseconds instead of hundreds.
 
 ## Installation
 
 ### Requirements
 
 - Windows 10/11. On macOS and Linux the hooks are no-ops and only the rules and skill load.
-- GitHub Copilot CLI 1.0.63 or later (matchers on `postToolUse` and `PLUGIN_ROOT` for plugin hooks).
+- GitHub Copilot CLI 1.0.63 or later for PowerShell hooks (matchers on `postToolUse` and `PLUGIN_ROOT` for plugin hooks). Extension mode was verified on **1.0.103**; use that version or later for it, with experimental features enabled and the extension approved.
 - PowerShell 7 on the **machine or user PATH**, not just in your terminal. Verify from a non-PowerShell parent, which is what the CLI's background process is:
 
 ```powershell
@@ -67,17 +134,38 @@ copilot plugin marketplace add jj1985/copilot-windows-guard
 copilot plugin install windows-guard@copilot-windows-guard
 ```
 
+The marketplace's plugin source is `./plugins/windows-guard` in this repository, so the marketplace and the plugin always match.
+
+### Updating an existing installation
+
+```powershell
+copilot plugin update windows-guard@copilot-windows-guard
+```
+
+Start a new session afterwards: running sessions keep the hooks they loaded. If the marketplace was registered against a branch (`jj1985/copilot-windows-guard#<branch>`), remove it and add it again so it follows `main`:
+
+```powershell
+copilot plugin uninstall windows-guard@copilot-windows-guard
+copilot plugin marketplace remove copilot-windows-guard
+copilot plugin marketplace add jj1985/copilot-windows-guard
+copilot plugin install windows-guard@copilot-windows-guard
+```
+
 ### Directly from the repository
 
 ```powershell
 copilot plugin install jj1985/copilot-windows-guard:plugins/windows-guard
 ```
 
+This fetches the default branch; `copilot plugin install` accepts neither a ref nor a local path (verified on CLI 1.0.103).
+
 ### For one session, from a local clone
 
 ```powershell
 copilot --plugin-dir .\plugins\windows-guard
 ```
+
+This uses the PowerShell engine. For the extension engine, set `WINDOWS_GUARD_MODE=extension` and add `--experimental` as shown above. If a marketplace copy is installed as well, set `COPILOT_PLUGIN_DIR_ONLY=true` so only the local copy loads.
 
 ### For a team repository
 
@@ -112,16 +200,19 @@ The plugin logs what it changed or denied to `windows-guard.log` in the plugin's
 
 ## Configuration
 
-Environment variables, read by the hooks at run time:
+Environment variables shared by both engines. PowerShell hooks read them per event; the extension inherits them when its process starts, so restart the session after changing them:
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `WINDOWS_GUARD_DEFAULT_EOL` | `lf` | Ending for files with no `.gitattributes` rule, no index entry and no extension match. Set `crlf` for a CRLF-convention codebase without `.gitattributes`. |
 | `WINDOWS_GUARD_CRLF_EXT` | `.bat .cmd .sln .vcproj .vcxproj` | Extensions that always get CRLF when nothing else decides. Comma, semicolon or space separated. |
 | `WINDOWS_GUARD_KEEP_BOM_EXT` | (empty) | Extensions whose existing BOM is preserved, for example `.ps1` if non-ASCII scripts must run under Windows PowerShell 5.1. |
+| `WINDOWS_GUARD_FINAL_NEWLINE` | (unset) | `1` adds a missing final newline after every edit, `0` never does. Unset, the nearest `.editorconfig`'s `insert_final_newline` for the file decides; no setting means the end of the file is left as written. |
 | `WINDOWS_GUARD_DEBUG` | (unset) | Log every raw hook payload. |
+| `WINDOWS_GUARD_MODE` | (unset) | `extension` makes every `hooks.json` launcher exit immediately while the extension is running for the session (liveness marker present and its process alive); otherwise the PowerShell scripts run as usual. Needs the experimental branch's plugin and experimental features on to gain anything. See [Extension mode](#extension-mode-experimental). |
+| `WINDOWS_GUARD_PARSER` | (unset) | `off` stops both engines from denying a command only because it does not parse; the AST rules still run. |
 
-The most reliable way to express a repository's line-ending policy is `.gitattributes`, which the normalizer treats as the single source of truth:
+The most reliable way to express a repository's line-ending policy is `.gitattributes`, which the normalizer treats as the single source of truth. From `.editorconfig` it honors `insert_final_newline` only, with the usual section globs, nearest-file precedence and `root = true`:
 
 ```gitattributes
 * text=auto eol=lf
@@ -141,25 +232,34 @@ The most reliable way to express a repository's line-ending policy is `.gitattri
 
 Evaluated against CLI 1.0.103 (2026-10-22). None of the experimental features fixes the file tools' CRLF/BOM behavior, but three are worth knowing about:
 
-- **Extensions** (`--experimental`): in-process JavaScript that can register tools and session hook callbacks (`onPreToolUse`, `onPostToolUse`, `onSessionStart`). A future version of this plugin could ship the guard and normalizer as an extension and avoid spawning PowerShell on every tool call. The earlier blockers are reported fixed: plugin-shipped extensions load since v1.0.88 ([copilot-cli#3023](https://github.com/github/copilot-cli/issues/3023)) and `additionalContext` from extension hooks is honored ([copilot-cli#2652](https://github.com/github/copilot-cli/issues/2652)). Remaining costs: every user must keep experimental mode on, extension hooks cannot see tool failures yet ([copilot-sdk#1220](https://github.com/github/copilot-sdk/issues/1220)), each extension asks for approval, and prompt-mode sessions need `GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS=true`. Built-in tools cannot be overridden, so an extension cannot replace `edit` either.
+- **Extensions** (`--experimental`): in-process JavaScript that can register tools and session hook callbacks. Since 0.2.0 this plugin ships one, off by default; see [Extension mode](#extension-mode-experimental). Verified on 1.0.103: a plugin-shipped extension loads from `com.github.copilot/extensions/` (also in `-p` mode, with no extra variable for a plugin-shipped extension), `additionalContext` from `onSessionStart` and `onPostToolUse` reaches the model ([copilot-cli#2652](https://github.com/github/copilot-cli/issues/2652) closed), and `onPostToolUseFailure` receives edit-tool failures ([copilot-sdk#1220](https://github.com/github/copilot-sdk/issues/1220) is still open for rejected, denied and timed-out results). Built-in tools cannot be overridden, so `edit` and `create` still write CRLF first and the extension, like the hook, corrects the bytes afterwards.
 - **`/rewind` file restore**: restores only the files Copilot changed, without git. A useful undo when a whole-file rewrite slips through.
-- **Dynamic retrieval of skills** (`dynamicRetrieval.skills`): embedding-based per-turn retrieval that makes the quoting skill more likely to load when a prompt involves quoting or shell commands.
+- **Dynamic retrieval of skills** (`--dynamic-retrieval skills=on`, persisted as `dynamicRetrieval.skills`): embedding-based per-turn retrieval of skill descriptions. Not a lever for this plugin, measured on 1.0.103 (2026-10-23): the persisted setting alone leaves the runtime logging `Embedding retrieval skipped: DYNAMIC_INSTRUCTIONS_RETRIEVAL not enabled`; with that flag forced on through `enabledFeatureFlags`, it logs `Embedding retrieval disabled: not enough content (0 deferred servers, 5 indexable skills)` and falls back to listing every skill description in the prompt, which is the default behavior anyway. It only changes anything once many skills are installed, and then it narrows the list rather than boosting a skill. In five quote-heavy prompt-mode runs the model never loaded the quoting skill in either state and still quoted correctly, because the rules injected at session start already cover the common cases.
 
-The **assisted approval** mode, the **critic** and **rubber-duck** agents and **autopilot** are about approvals, review and autonomy, not bytes on disk; they neither help nor hurt here. Hooks remain the only deterministic layer.
+The **assisted approval** mode, the **critic** and **rubber-duck** agents and **autopilot** are about approvals, review and autonomy, not bytes on disk; they neither help nor hurt here. The plugin's hooks, whether PowerShell scripts or extension callbacks, remain the deterministic layer.
 
 ## Development
+
+When trying a checkout live, set `COPILOT_PLUGIN_DIR_ONLY=true` so an installed copy of the plugin does not load alongside `--plugin-dir`.
 
 ```powershell
 pwsh -NoProfile -File tests/Invoke-HookTests.ps1                      # hooks under PowerShell 7
 pwsh -NoProfile -File tests/Invoke-HookTests.ps1 -Shell powershell    # hooks under Windows PowerShell 5.1
 copilot --plugin-dir .\plugins\windows-guard                          # try it live without installing
+node --test tests/extension.test.mjs                                  # extension logic, plain Node.js
+node --test tests/replay.test.mjs                                     # replay corpus through the extension logic
+pwsh -NoProfile -File tests/Invoke-ReplayTests.ps1                    # replay corpus through the PowerShell hooks
+node tests/replay-parity.mjs                                          # both engines must agree row by row
+$env:WINDOWS_GUARD_MODE = 'extension'; copilot --experimental --plugin-dir .\plugins\windows-guard   # extension mode live
 ```
 
-The tests feed synthetic Copilot CLI hook payloads to each script and check bytes on disk, deny decisions, exit codes and the inline launcher in `hooks.json`. CI runs them on `windows-latest`.
+The tests feed synthetic Copilot CLI hook payloads to each script and check bytes on disk, deny decisions, exit codes and the inline launcher in `hooks.json`. `tests/extension.test.mjs` runs the same cases against the extension's `guard.mjs` and its session-hook wiring with `node --test` and no dependencies. CI runs all of it on `windows-latest`.
+
+`tests/corpus/` is the replay corpus: real commands and tool failures labeled with the intended decision, scored for precision and recall against `tests/corpus/baseline.json`, with `known-gap` rows for the cases the plugin still gets wrong. Both engines replay it and a parity check requires identical decisions. See [tests/corpus/README.md](tests/corpus/README.md) for the row format and how to import a session history.
 
 The hook payload shape is not documented, so it was verified against a live Copilot CLI 1.0.101 session: `toolArgs` arrives as an object; `create` carries `path` (absolute) and `file_text`; the shell tool carries `command`. The scripts still try `file_path`, `filePath`, `filename`, `fileName`, `file`, `target_file`, and parse `apply_patch` text, in case this changes. If the log shows `NO PATH KEY` lines, open an issue with the logged `toolArgs` shape.
 
-Verified live on 2026-10-22 with CLI 1.0.101: a file the `create` tool reported as 17 characters (CRLF) was 14 bytes of LF on disk after the hook; `echo hello > file` was denied with the reason shown above and the agent switched to the `create` tool on its own.
+Verified live on 2026-10-22 with CLI 1.0.101: a file the `create` tool reported as 17 characters (CRLF) was 14 bytes of LF on disk after the hook; `echo hello > file` was denied with the reason shown above and the agent switched to the `create` tool on its own. Extension mode was verified the same way on 2026-10-23 with CLI 1.0.103 (see [Extension mode](#extension-mode-experimental)).
 
 ## License
 

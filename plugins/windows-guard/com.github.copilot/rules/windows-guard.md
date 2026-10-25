@@ -9,7 +9,11 @@ These rules apply because this machine runs Windows and the shell tool is PowerS
 - Quote literals with single quotes; double a single quote to embed it (`'it''s'`). Inside double quotes `$x` expands; a literal double quote is `""` or `` `" ``. Backslash is never an escape character.
 - Quote every path that contains spaces. Use `-LiteralPath` when a path contains `[` or `]`. Never assign to `$home`.
 - `npm`, `npx`, `yarn`, `pnpm` and `gradlew` are `.cmd` shims with legacy argument passing: arguments containing double quotes get mangled. Pass JSON through a file, call the underlying `.exe`/`.js` directly, use `cmd /c "..."`, or the stop-parsing token `--%`.
-- Anything longer than one pipeline, or anything quote-heavy or multi-line: create a `.ps1` with the create tool, then run `pwsh -NoProfile -ExecutionPolicy Bypass -File .\script.ps1`. No bash heredocs and no here-strings inside shell commands.
+- Anything longer than one pipeline, or anything quote-heavy or multi-line: create a `.ps1` with the create tool, then run `pwsh -NoProfile -ExecutionPolicy Bypass -File .\script.ps1`. No bash heredocs. A single-quoted here-string piped to an interpreter's stdin (`@'...'@ | python -`) is fine; never use a here-string to write a file.
+- `cd` moves PowerShell's location only. .NET calls such as `[IO.File]`, `[IO.Directory]` and `[IO.Path]` resolve a relative path against the folder the session started in, so after `cd` give them `(Resolve-Path x).Path`, `"$PWD\x"` or an absolute path.
+- A failed `cd` does not stop the line and the exit code stays 0: use `Set-Location X -ErrorAction Stop`, or avoid changing directory (`git -C <dir>`, absolute paths).
+- Never pipe `2>&1` into `ConvertFrom-Json`, `jq` or a parser: stderr text corrupts the input. Use `2>$null` (or `2>$errFile`) and check `$LASTEXITCODE` before parsing.
+- Inside double quotes write `${var}:` when a colon follows a variable; `$var:` is read as a scope or drive prefix.
 
 ## Files
 - Create and modify files only with the edit and create tools. Never write file content through `>`, `>>`, `echo`, `Set-Content`, `Out-File`, `Add-Content`, `python -c`, `node -e` or `sed -i`.

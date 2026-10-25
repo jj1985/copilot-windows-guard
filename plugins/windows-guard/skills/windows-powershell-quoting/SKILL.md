@@ -54,7 +54,7 @@ Create `script.ps1` with the create tool, then run:
 pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\script.ps1
 ```
 
-Inside the script, here-strings are safe (`@'` ... `'@` with the closing marker at column 0). In a one-line shell command they are not.
+Here-strings are safe inside a script, and a single-quoted here-string piped to an interpreter's stdin (`@'` ... `'@ | python -`, closing marker at column 0) is the most reliable way to run quote-heavy or multi-line code without writing a file. Never use a here-string to write a file from the shell.
 
 ## When an edit fails with "No match found"
 
