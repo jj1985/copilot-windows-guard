@@ -2,14 +2,12 @@
 
 A GitHub Copilot CLI plugin that stops the agent from corrupting files on Windows and coaches it through PowerShell quoting and edit failures.
 
-**Experimental branch preview.** Install this branch's plugin, not the default-branch version:
-
 ```powershell
-copilot plugin marketplace add jj1985/copilot-windows-guard#experimental
+copilot plugin marketplace add jj1985/copilot-windows-guard
 copilot plugin install windows-guard@copilot-windows-guard
 ```
 
-If a stable copy is already installed, follow the [switching instructions](../../README.md#switching-an-existing-installation) first. PowerShell hooks remain the default. To use the extension engine (verified on CLI 1.0.103):
+PowerShell hooks are the default engine and need no setup. The in-process extension engine is opt-in (verified on CLI 1.0.103):
 
 ```powershell
 $env:WINDOWS_GUARD_MODE = 'extension'
@@ -28,7 +26,7 @@ See the [repository README](../../README.md) for the full description, installat
 | `com.github.copilot/hooks/hooks.json` | The Copilot CLI hooks (sessionStart, preToolUse, postToolUse, postToolUseFailure); every launcher exits at once when `WINDOWS_GUARD_MODE=extension` |
 | `com.github.copilot/extensions/windows-guard/extension.mjs` | Experimental Copilot CLI extension: the same behaviors as in-process session hooks, active only with `WINDOWS_GUARD_MODE=extension` |
 | `com.github.copilot/extensions/windows-guard/guard.mjs` | The extension's logic, mirroring `scripts/*.ps1`; tested by `tests/extension.test.mjs` |
-| `scripts/normalize-eol.ps1` | After each edit/create: restore the intended line ending, remove the UTF-8 BOM |
+| `scripts/normalize-eol.ps1` | After each edit/create: restore the intended line ending, remove the UTF-8 BOM, optionally add a missing final newline |
 | `scripts/shell-guard.ps1` | Before each shell command: reads the hook payload and relays the analyzer's decision |
 | `scripts/analyze-command.ps1` | The shell-guard rules, decided on PowerShell's AST; dot-sourced by the hook and run by the extension, so both engines agree |
 | `scripts/utf8-gate.ps1` | Before each edit: refuse to touch files that are not UTF-8 (the edit tool would destroy them) |
@@ -37,4 +35,4 @@ See the [repository README](../../README.md) for the full description, installat
 | `com.github.copilot/rules/windows-guard.md` | Always-on instructions for Windows and PowerShell |
 | `skills/windows-powershell-quoting/SKILL.md` | On-demand quoting and file-writing reference |
 
-All scripts run under PowerShell 7 and Windows PowerShell 5.1. The extension needs no separate Node.js or SDK installation: Copilot CLI runs this branch's installed extension with its bundled Node.js runtime when experimental features are on.
+All scripts run under PowerShell 7 and Windows PowerShell 5.1. The extension needs no separate Node.js or SDK installation: Copilot CLI runs the installed extension with its bundled Node.js runtime when experimental features are on.

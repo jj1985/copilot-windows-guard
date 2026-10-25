@@ -204,6 +204,96 @@ export function resultText(toolResult) {
   return typeof t === "string" ? t : "";
 }
 
+function parseFinalNewline(value) {
+  const v = String(value ?? "").trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(v)) return true;
+  if (["0", "false", "no", "off"].includes(v)) return false;
+  return null;
+}
+
+// .editorconfig section glob -> RegExp: * (not /), ** (anything), ?, [class], {a,b}.
+export function editorConfigGlobToRegExp(glob) {
+  let re = "";
+  let inBrace = false;
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") {
+      if (glob[i + 1] === "*") {
+        re += ".*";
+        i++;
+      } else re += "[^/]*";
+    } else if (c === "?") re += "[^/]";
+    else if (c === "{") {
+      re += "(";
+      inBrace = true;
+    } else if (c === "}") {
+      re += ")";
+      inBrace = false;
+    } else if (c === "," && inBrace) re += "|";
+    else if (c === "[") {
+      const j = glob.indexOf("]", i);
+      if (j > i) {
+        re += glob.slice(i, j + 1).replace("[!", "[^");
+        i = j;
+      } else re += "\\[";
+    } else re += c.replace(/[.+^$()|\\]/g, "\\$&");
+  }
+  return new RegExp(`^${re}$`);
+}
+
+// A glob without a slash matches the file name anywhere below the .editorconfig; with a slash it
+// matches the path relative to that directory (forward slashes).
+export function editorConfigGlobMatches(glob, relativePath) {
+  let g = glob;
+  let target = relativePath;
+  if (g.includes("/")) {
+    if (g.startsWith("/")) g = g.slice(1);
+  } else target = path.posix.basename(relativePath);
+  return editorConfigGlobToRegExp(g).test(target);
+}
+
+// true or false when a .editorconfig decides insert_final_newline for this file, else null.
+// Nearer files override farther ones; a file with root = true ends the search.
+export function editorConfigFinalNewline(filePath) {
+  const configs = [];
+  let d = path.dirname(filePath);
+  for (;;) {
+    const cfg = path.join(d, ".editorconfig");
+    if (fs.existsSync(cfg) && fs.statSync(cfg).isFile()) {
+      configs.push(cfg);
+      if (/^\s*root\s*=\s*true\s*$/im.test(fs.readFileSync(cfg, "utf8"))) break;
+    }
+    const parent = path.dirname(d);
+    if (!parent || parent === d) break;
+    d = parent;
+  }
+  configs.reverse();
+  let result = null;
+  for (const cfg of configs) {
+    const base = path.dirname(cfg);
+    const rel = filePath.slice(base.length).replace(/^[\\/]+/, "").replace(/\\/g, "/");
+    let inSection = false;
+    let applies = false;
+    for (const line of fs.readFileSync(cfg, "utf8").split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t || t.startsWith("#") || t.startsWith(";")) continue;
+      if (t.startsWith("[") && t.endsWith("]")) {
+        inSection = true;
+        applies = editorConfigGlobMatches(t.slice(1, -1), rel);
+        continue;
+      }
+      if (!inSection || !applies) continue;
+      const m = t.match(/^insert_final_newline\s*=\s*(\S+)/i);
+      if (m) {
+        const v = m[1].toLowerCase();
+        if (v === "true") result = true;
+        else if (v === "false") result = false;
+      }
+    }
+  }
+  return result;
+}
+
 function splitList(value, fallback) {
   return value ? String(value).split(/[,; ]+/).filter(Boolean) : fallback;
 }
@@ -220,6 +310,8 @@ function deny(reason) {
 //   3. ending already in the git index for a tracked file (i/lf, i/crlf); i/mixed -> keep
 //   4. WINDOWS_GUARD_CRLF_EXT list (default .bat .cmd .sln .vcproj .vcxproj) -> crlf
 //   5. WINDOWS_GUARD_DEFAULT_EOL (default lf)
+// A missing final newline is added when WINDOWS_GUARD_FINAL_NEWLINE=1, or, when that variable is unset,
+// when the nearest .editorconfig says insert_final_newline = true for the file (0 never adds one).
 // Git is consulted only inside a work tree, so a global core.autocrlf=true cannot leak.
 export async function normalizeEol(input, { env = process.env, log = writeGuardLog } = {}) {
   const results = [];
@@ -242,6 +334,7 @@ export async function normalizeEol(input, { env = process.env, log = writeGuardL
     defaultEol: env.WINDOWS_GUARD_DEFAULT_EOL === "crlf" ? "crlf" : "lf",
     crlfExt: splitList(env.WINDOWS_GUARD_CRLF_EXT, [".bat", ".cmd", ".sln", ".vcproj", ".vcxproj"]),
     keepBomExt: splitList(env.WINDOWS_GUARD_KEEP_BOM_EXT, []),
+    finalNewline: parseFinalNewline(env.WINDOWS_GUARD_FINAL_NEWLINE),
   };
   for (const full of files) {
     try {
@@ -299,6 +392,19 @@ async function normalizeFile(full, policy) {
   if (eol === "crlf") out = lfText.replace(/\n/g, "\r\n");
   else if (eol === "keep") out = text;
   else out = lfText;
+
+  // Optional final newline: the variable wins, else the nearest .editorconfig; unset leaves the end alone.
+  let wantFinal = policy.finalNewline;
+  if (wantFinal === null) {
+    try {
+      wantFinal = editorConfigFinalNewline(full);
+    } catch {
+      wantFinal = null;
+    }
+  }
+  if (wantFinal === true && out.length > 0 && !out.endsWith("\n")) {
+    out += eol === "crlf" || (eol === "keep" && out.includes("\r\n")) ? "\r\n" : "\n";
+  }
 
   const keepBom = hasBom && policy.keepBomExt.includes(ext);
   const removeBom = hasBom && !keepBom;

@@ -169,6 +169,66 @@ describe("normalizeEol", () => {
     assert.deepEqual(r, []);
   });
 
+  describe("final newline", () => {
+    const e = newDir("finalnl");
+    fs.writeFileSync(path.join(e, ".editorconfig"), "root = true\n[*]\ninsert_final_newline = true\n[*.md]\ninsert_final_newline = false\n[*.{bat,cmd}]\nend_of_line = crlf\n");
+    const nested = path.join(e, "sub");
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(nested, ".editorconfig"), "root = true\n");
+    const offEnv = { ...process.env, WINDOWS_GUARD_FINAL_NEWLINE: "0" };
+    const onEnv = { ...process.env, WINDOWS_GUARD_FINAL_NEWLINE: "1" };
+
+    it(".editorconfig insert_final_newline = true adds the missing newline", async () => {
+      fs.writeFileSync(path.join(e, "t.txt"), utf8("a\r\nb"));
+      await g.normalizeEol(editPayload(e, { path: "t.txt" }), opts);
+      assert.deepEqual(eolInfo(path.join(e, "t.txt")), { bytes: 4, bom: false, crlf: 0, lf: 2 });
+    });
+    it("a later section turns it off for .md", async () => {
+      fs.writeFileSync(path.join(e, "t.md"), utf8("a\r\nb"));
+      await g.normalizeEol(editPayload(e, { path: "t.md" }), opts);
+      assert.deepEqual(eolInfo(path.join(e, "t.md")), { bytes: 3, bom: false, crlf: 0, lf: 1 });
+    });
+    it("a CRLF file gets a CRLF final newline", async () => {
+      fs.writeFileSync(path.join(e, "run.bat"), utf8("@echo off\necho hi"));
+      await g.normalizeEol(editPayload(e, { path: "run.bat" }), opts);
+      const s = fs.readFileSync(path.join(e, "run.bat"), "utf8");
+      assert.equal(s, "@echo off\r\necho hi\r\n");
+    });
+    it("WINDOWS_GUARD_FINAL_NEWLINE=0 overrides .editorconfig", async () => {
+      fs.writeFileSync(path.join(e, "u.txt"), utf8("a\r\nb"));
+      await g.normalizeEol(editPayload(e, { path: "u.txt" }), { ...opts, env: offEnv });
+      assert.deepEqual(eolInfo(path.join(e, "u.txt")), { bytes: 3, bom: false, crlf: 0, lf: 1 });
+    });
+    it("WINDOWS_GUARD_FINAL_NEWLINE=1 works without any .editorconfig", async () => {
+      const plain2 = newDir("finalnl-plain");
+      fs.writeFileSync(path.join(plain2, "v.txt"), utf8("a\r\nb"));
+      await g.normalizeEol(editPayload(plain2, { path: "v.txt" }), { ...opts, env: onEnv });
+      assert.deepEqual(eolInfo(path.join(plain2, "v.txt")), { bytes: 4, bom: false, crlf: 0, lf: 2 });
+    });
+    it("a nested root = true stops the search before the parent's setting", async () => {
+      fs.writeFileSync(path.join(nested, "w.txt"), utf8("a\r\nb"));
+      await g.normalizeEol(editPayload(nested, { path: "w.txt" }), opts);
+      assert.deepEqual(eolInfo(path.join(nested, "w.txt")), { bytes: 3, bom: false, crlf: 0, lf: 1 });
+    });
+    it("a file that already ends with a newline is left alone", async () => {
+      fs.writeFileSync(path.join(e, "x.txt"), utf8("a\nb\n"));
+      const r = await g.normalizeEol(editPayload(e, { path: "x.txt" }), opts);
+      assert.equal(r[0].changed, false);
+    });
+    it("glob matching: **, ?, [class], {a,b}, and a slash anchors to the config directory", () => {
+      assert.equal(g.editorConfigGlobMatches("*", "docs/a.md"), true);
+      assert.equal(g.editorConfigGlobMatches("*.md", "docs/a.md"), true);
+      assert.equal(g.editorConfigGlobMatches("docs/*.md", "docs/a.md"), true);
+      assert.equal(g.editorConfigGlobMatches("docs/*.md", "src/a.md"), false);
+      assert.equal(g.editorConfigGlobMatches("**.py", "a/b/c.py"), true);
+      assert.equal(g.editorConfigGlobMatches("?.txt", "a.txt"), true);
+      assert.equal(g.editorConfigGlobMatches("[ab].txt", "b.txt"), true);
+      assert.equal(g.editorConfigGlobMatches("{Makefile,*.mk}", "Makefile"), true);
+      assert.equal(g.editorConfigGlobMatches("*.{bat,cmd}", "run.cmd"), true);
+      assert.equal(g.editorConfigGlobMatches("*.{bat,cmd}", "run.ps1"), false);
+    });
+  });
+
   describe("git policies", { skip: !haveGit && "git not found" }, () => {
     it(".gitattributes eol=crlf wins for an untracked file", async () => {
       const gd = newGitRepo("attr");

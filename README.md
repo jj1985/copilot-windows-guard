@@ -2,14 +2,12 @@
 
 A plugin marketplace for [GitHub Copilot CLI](https://docs.github.com/en/copilot/concepts/agents/copilot-cli) with one plugin, **windows-guard**, that stops the agent from mangling files on Windows 11 and teaches it to write PowerShell that works the first time.
 
-**Experimental branch:** this is the opt-in extension-engine preview, not the stable [`main` branch](https://github.com/jj1985/copilot-windows-guard/tree/main). Install from `experimental` explicitly; installing the repository without a ref selects the default branch. PowerShell hooks remain the default engine even on this branch.
-
 ```powershell
-copilot plugin marketplace add jj1985/copilot-windows-guard#experimental
+copilot plugin marketplace add jj1985/copilot-windows-guard
 copilot plugin install windows-guard@copilot-windows-guard
 ```
 
-Already installed the stable plugin? Follow [Switching an existing installation](#switching-an-existing-installation) first. To activate the preview after installation, follow [Extension mode](#extension-mode-experimental).
+The PowerShell hooks work with no further setup. An in-process extension engine that does the same work with less latency is opt-in; see [Extension mode](#extension-mode-experimental).
 
 ## The problem
 
@@ -27,7 +25,7 @@ Hooks are the only user-controlled layer that sits between the model and the fil
 
 | Hook | Event | Effect |
 |---|---|---|
-| `normalize-eol.ps1` | `postToolUse` on `edit`, `create`, `str_replace_editor`, `apply_patch` | Rewrites the file to the intended line ending and removes the BOM, milliseconds after the tool wrote it. Intended ending: `.gitattributes eol=` → `core.autocrlf=true` → what the git index already holds → `.bat`/`.cmd`/`.sln` list → LF. Respects `-text`. |
+| `normalize-eol.ps1` | `postToolUse` on `edit`, `create`, `str_replace_editor`, `apply_patch` | Rewrites the file to the intended line ending and removes the BOM, milliseconds after the tool wrote it. Intended ending: `.gitattributes eol=` → `core.autocrlf=true` → what the git index already holds → `.bat`/`.cmd`/`.sln` list → LF. Respects `-text`. Adds a missing final newline when `.editorconfig` says `insert_final_newline = true` for the file, or when `WINDOWS_GUARD_FINAL_NEWLINE=1`. |
 | `shell-guard.ps1` | `preToolUse` on the shell tool | Decides on PowerShell's own AST (`scripts/analyze-command.ps1`, shared with the extension): denies heredocs and `<` input redirection, Unix commands that are not installed (`grep`, `head`, `sed`, ...), `2>/dev/null`, `VAR=x cmd`, cmd.exe switches, real file redirects, `Set-Content`/`Out-File` without `-Encoding utf8NoBOM`, inline `python -c`/`node -e` file writes and multi-line one-liners, bash `\"` escapes, `$home =`, a relative `[IO.File]`/`[IO.Directory]` path after `cd` (.NET resolves it against the session's start folder), a first-statement `cd` to a folder that does not exist (the rest of the line would run in the old folder with exit 0), `2>&1` piped into `ConvertFrom-Json`/`jq`/`json.load`, and anything that does not parse, with the exact error. A `>` inside a string or a here-string, or `head` inside a quoted argument, is content and passes. Every denial reason contains the PowerShell form to use instead. |
 | `utf8-gate.ps1` | `preToolUse` on `edit`, `str_replace_editor`, `apply_patch` | Refuses to edit a file that is Windows-1252, UTF-16 or otherwise not UTF-8, because the edit tool would corrupt it irreversibly, and tells the agent to ask you first. |
 | `recovery-coach.ps1` | `postToolUse` on the shell tool, and `postToolUseFailure` on all tools | When a command exits non-zero or an edit fails, recognizes the cause (quoting, bash-ism, 5.1 syntax, "No match found", a missing directory or an existing file on create, a failed `cd` that let the rest of the line run, a JSON parse failure caused by `2>&1`, cp1252 `UnicodeEncodeError`, a missing Python package or runner (`uv run --with`), `git rev-parse` with two refs, an unexpanded wildcard, locked file, execution policy) and tells the agent when a non-zero exit is benign (a search with no match, `gh pr checks` pending, a suppressed `-ErrorAction SilentlyContinue` error). Parse-error advice fires only on a non-zero exit with PowerShell's own error layout, so error words inside a search result stay silent and appends concrete recovery steps to what the agent sees. The edit guidance explicitly forbids rewriting the whole file as a workaround. (Copilot CLI reports a failed shell command as a successful tool call with the exit code in the text, which is why the shell path uses `postToolUse`.) |
@@ -64,11 +62,11 @@ It is **off by default**. One switch selects the engine, so nothing ever runs tw
 
 How the launchers know: when the extension joins a session in extension mode it writes `%LOCALAPPDATA%\copilot-windows-guard\active\<sessionId>` containing its process id, and removes the file when the session ends or the process exits. A launcher in extension mode reads the session id from its payload and exits early only if that file exists and the process is alive; otherwise it runs its script. A stale file from a crashed extension cannot disable the hooks, because its process id is dead.
 
-Verified on 2026-10-23 with CLI 1.0.103: with the variable set but experimental features off (so the extension never loads), a created file still came out as 14 LF bytes, and the plugin's own log shows the PowerShell normalizer doing it; with the extension running, the marker file existed for the session, the PowerShell log stayed silent, and the marker was gone after exit. The same checks pass against the plugin installed from this branch through the marketplace pin: hooks engine, and extension engine for create, deny and coach.
+Verified on 2026-10-23 with CLI 1.0.103: with the variable set but experimental features off (so the extension never loads), a created file still came out as 14 LF bytes, and the plugin's own log shows the PowerShell normalizer doing it; with the extension running, the marker file existed for the session, the PowerShell log stayed silent, and the marker was gone after exit. The same checks pass against the plugin installed through the marketplace: hooks engine, and extension engine for create, deny and coach.
 
 ### Enable it
 
-Install the plugin from the `experimental` branch using the [installation instructions](#installation) first. Setting the variable is safe even when the extension cannot run: without a liveness marker the launchers run their PowerShell scripts as usual.
+Install the plugin first ([installation](#installation)). Setting the variable is safe even when the extension cannot run: without a liveness marker the launchers run their PowerShell scripts as usual.
 
 ```powershell
 $env:WINDOWS_GUARD_MODE = 'extension'
@@ -79,7 +77,7 @@ copilot --experimental
 
 - **Approve the extension.** Interactive sessions ask once per extension and directory (per the CLI docs); `--allow-all-tools`, or `--allow-tool` with the `extension-permission-access(...)` pattern, skips the prompt. The prompt-mode runs below used `--allow-all-tools` and were not asked.
 - **Prompt mode works without extra settings.** `copilot -p ...` loaded the installed plugin's extension as is (verified with the marketplace install on 1.0.103). `GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS=true` is the CLI's switch for repository extensions under `.github/extensions/`, which prompt mode otherwise skips; it is harmless here.
-- **No separate Node.js or SDK installation.** Once this branch's plugin is installed, the CLI runs the extension with the Node.js runtime inside `copilot.exe` and resolves `@github/copilot-sdk/extension` itself; the log shows `node v24.22.1 at ...\copilot.exe`.
+- **No separate Node.js or SDK installation.** The CLI runs the extension with the Node.js runtime inside `copilot.exe` and resolves `@github/copilot-sdk/extension` itself; the log shows `node v24.22.1 at ...\copilot.exe`.
 - **Confirm it is active.** The session timeline shows `windows-guard: extension mode active`, `/extensions manage` lists `windows-guard` as running, and `windows-guard.log` gains `[ext]` lines, and `%LOCALAPPDATA%\copilot-windows-guard\active\` holds a file named after the session id. Each extension also writes its own log under `~/.copilot/logs/extensions/`.
 
 ### What you gain and what you pay
@@ -116,7 +114,7 @@ Keep the default unless the per-call latency bothers you. The hooks need no expe
 ### Requirements
 
 - Windows 10/11. On macOS and Linux the hooks are no-ops and only the rules and skill load.
-- GitHub Copilot CLI 1.0.63 or later for PowerShell hooks (matchers on `postToolUse` and `PLUGIN_ROOT` for plugin hooks). The experimental extension was verified on **1.0.103**; use that version or later for extension mode, with experimental features enabled and extension approval granted.
+- GitHub Copilot CLI 1.0.63 or later for PowerShell hooks (matchers on `postToolUse` and `PLUGIN_ROOT` for plugin hooks). Extension mode was verified on **1.0.103**; use that version or later for it, with experimental features enabled and the extension approved.
 - PowerShell 7 on the **machine or user PATH**, not just in your terminal. Verify from a non-PowerShell parent, which is what the CLI's background process is:
 
 ```powershell
@@ -129,41 +127,41 @@ If that fails, install it and open a new terminal:
 winget install --id Microsoft.PowerShell --source winget
 ```
 
-### From the experimental marketplace
+### From the marketplace
 
 ```powershell
-copilot plugin marketplace add jj1985/copilot-windows-guard#experimental
+copilot plugin marketplace add jj1985/copilot-windows-guard
 copilot plugin install windows-guard@copilot-windows-guard
 ```
 
-The marketplace's relative plugin source (`./plugins/windows-guard`) comes from the same branch checkout (verified on CLI 1.0.103: the installed plugin contains this branch's `com.github.copilot/extensions/`). The names `copilot-windows-guard` and `windows-guard` are unchanged; stable and experimental installs are alternatives, not side-by-side copies.
+The marketplace's plugin source is `./plugins/windows-guard` in this repository, so the marketplace and the plugin always match.
 
-### Switching an existing installation
-
-Close active Copilot sessions. If the plugin is already installed, uninstall it before changing its source:
+### Updating an existing installation
 
 ```powershell
-copilot plugin uninstall windows-guard
+copilot plugin update windows-guard@copilot-windows-guard
 ```
 
-If the marketplace is already registered, remove it, then add the branch-pinned source and reinstall:
+Start a new session afterwards: running sessions keep the hooks they loaded. If the marketplace was registered against a branch (`jj1985/copilot-windows-guard#<branch>`), remove it and add it again so it follows `main`:
 
 ```powershell
+copilot plugin uninstall windows-guard@copilot-windows-guard
 copilot plugin marketplace remove copilot-windows-guard
-copilot plugin marketplace add jj1985/copilot-windows-guard#experimental
+copilot plugin marketplace add jj1985/copilot-windows-guard
 copilot plugin install windows-guard@copilot-windows-guard
 ```
-
-To reinstall stable instead, unset `WINDOWS_GUARD_MODE`, repeat these steps with `jj1985/copilot-windows-guard` (no `#experimental`), and start a new session. Remove any repository-level `ref` pin below as well.
 
 ### Directly from the repository
 
-Not for this branch. `copilot plugin install owner/repo:path` always fetches the default branch and accepts no ref (verified on CLI 1.0.103: `#experimental` and `@experimental` suffixes are rejected), and `copilot plugin install` does not accept a local path. Use the marketplace pin above, the team setting below, or a local clone for one session.
+```powershell
+copilot plugin install jj1985/copilot-windows-guard:plugins/windows-guard
+```
 
-### For one session, from a local clone of experimental
+This fetches the default branch; `copilot plugin install` accepts neither a ref nor a local path (verified on CLI 1.0.103).
+
+### For one session, from a local clone
 
 ```powershell
-git switch experimental
 copilot --plugin-dir .\plugins\windows-guard
 ```
 
@@ -171,12 +169,12 @@ This uses the PowerShell engine. For the extension engine, set `WINDOWS_GUARD_MO
 
 ### For a team repository
 
-Commit this to `.github/copilot/settings.json` so every clone gets the experimental plugin:
+Commit this to `.github/copilot/settings.json` so every clone gets the plugin:
 
 ```json
 {
   "extraKnownMarketplaces": {
-    "copilot-windows-guard": { "source": { "source": "github", "repo": "jj1985/copilot-windows-guard", "ref": "experimental" } }
+    "copilot-windows-guard": { "source": { "source": "github", "repo": "jj1985/copilot-windows-guard" } }
   },
   "enabledPlugins": { "windows-guard@copilot-windows-guard": true }
 }
@@ -209,11 +207,12 @@ Environment variables shared by both engines. PowerShell hooks read them per eve
 | `WINDOWS_GUARD_DEFAULT_EOL` | `lf` | Ending for files with no `.gitattributes` rule, no index entry and no extension match. Set `crlf` for a CRLF-convention codebase without `.gitattributes`. |
 | `WINDOWS_GUARD_CRLF_EXT` | `.bat .cmd .sln .vcproj .vcxproj` | Extensions that always get CRLF when nothing else decides. Comma, semicolon or space separated. |
 | `WINDOWS_GUARD_KEEP_BOM_EXT` | (empty) | Extensions whose existing BOM is preserved, for example `.ps1` if non-ASCII scripts must run under Windows PowerShell 5.1. |
+| `WINDOWS_GUARD_FINAL_NEWLINE` | (unset) | `1` adds a missing final newline after every edit, `0` never does. Unset, the nearest `.editorconfig`'s `insert_final_newline` for the file decides; no setting means the end of the file is left as written. |
 | `WINDOWS_GUARD_DEBUG` | (unset) | Log every raw hook payload. |
 | `WINDOWS_GUARD_MODE` | (unset) | `extension` makes every `hooks.json` launcher exit immediately while the extension is running for the session (liveness marker present and its process alive); otherwise the PowerShell scripts run as usual. Needs the experimental branch's plugin and experimental features on to gain anything. See [Extension mode](#extension-mode-experimental). |
 | `WINDOWS_GUARD_PARSER` | (unset) | `off` stops both engines from denying a command only because it does not parse; the AST rules still run. |
 
-The most reliable way to express a repository's line-ending policy is `.gitattributes`, which the normalizer treats as the single source of truth:
+The most reliable way to express a repository's line-ending policy is `.gitattributes`, which the normalizer treats as the single source of truth. From `.editorconfig` it honors `insert_final_newline` only, with the usual section globs, nearest-file precedence and `root = true`:
 
 ```gitattributes
 * text=auto eol=lf
@@ -241,7 +240,7 @@ The **assisted approval** mode, the **critic** and **rubber-duck** agents and **
 
 ## Development
 
-Run these commands from an `experimental` branch checkout. Avoid loading an installed copy of the plugin alongside `--plugin-dir`.
+When trying a checkout live, set `COPILOT_PLUGIN_DIR_ONLY=true` so an installed copy of the plugin does not load alongside `--plugin-dir`.
 
 ```powershell
 pwsh -NoProfile -File tests/Invoke-HookTests.ps1                      # hooks under PowerShell 7

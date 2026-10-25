@@ -116,6 +116,27 @@ $r = Invoke-Hook 'normalize-eol.ps1' (EditPayload $d @{ path = 'c.txt' }) @{ WIN
 $i = Get-EolInfo (Join-Path $d 'c.txt')
 Assert ($i.CRLF -eq 2 -and $i.LF -eq 0) 'WINDOWS_GUARD_DEFAULT_EOL=crlf keeps CRLF' ($i | ConvertTo-Json -Compress)
 
+# Optional final newline: .editorconfig insert_final_newline, overridden by WINDOWS_GUARD_FINAL_NEWLINE.
+$f = New-Dir 'finalnl'
+[IO.File]::WriteAllText((Join-Path $f '.editorconfig'), "root = true`n[*]`ninsert_final_newline = true`n[*.md]`ninsert_final_newline = false`n", $enc)
+[IO.File]::WriteAllBytes((Join-Path $f 't.txt'), $enc.GetBytes("a`r`nb"))
+$r = Invoke-Hook 'normalize-eol.ps1' (EditPayload $f @{ path = 't.txt' })
+$i = Get-EolInfo (Join-Path $f 't.txt')
+Assert ($i.Bytes -eq 4 -and $i.LF -eq 2) '.editorconfig insert_final_newline = true adds the missing newline' ($i | ConvertTo-Json -Compress)
+[IO.File]::WriteAllBytes((Join-Path $f 't.md'), $enc.GetBytes("a`r`nb"))
+$r = Invoke-Hook 'normalize-eol.ps1' (EditPayload $f @{ path = 't.md' })
+$i = Get-EolInfo (Join-Path $f 't.md')
+Assert ($i.Bytes -eq 3 -and $i.LF -eq 1) 'a later .editorconfig section turns it off for .md' ($i | ConvertTo-Json -Compress)
+[IO.File]::WriteAllBytes((Join-Path $f 'u.txt'), $enc.GetBytes("a`r`nb"))
+$r = Invoke-Hook 'normalize-eol.ps1' (EditPayload $f @{ path = 'u.txt' }) @{ WINDOWS_GUARD_FINAL_NEWLINE = '0' }
+$i = Get-EolInfo (Join-Path $f 'u.txt')
+Assert ($i.Bytes -eq 3 -and $i.LF -eq 1) 'WINDOWS_GUARD_FINAL_NEWLINE=0 overrides .editorconfig' ($i | ConvertTo-Json -Compress)
+$f2 = New-Dir 'finalnl-plain'
+[IO.File]::WriteAllBytes((Join-Path $f2 'v.txt'), $enc.GetBytes("a`r`nb"))
+$r = Invoke-Hook 'normalize-eol.ps1' (EditPayload $f2 @{ path = 'v.txt' }) @{ WINDOWS_GUARD_FINAL_NEWLINE = '1' }
+$i = Get-EolInfo (Join-Path $f2 'v.txt')
+Assert ($i.Bytes -eq 4 -and $i.LF -eq 2) 'WINDOWS_GUARD_FINAL_NEWLINE=1 adds the newline without any .editorconfig' ($i | ConvertTo-Json -Compress)
+
 if ($HaveGit) {
     $g = New-GitRepo 'attr'
     [IO.File]::WriteAllText((Join-Path $g '.gitattributes'), "*.txt text eol=crlf`n*.lf text eol=lf`n*.bin -text`n", $enc)
